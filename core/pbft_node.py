@@ -49,7 +49,7 @@ class PBFTNode:
         self.last_replies: Dict[int, Reply] = {}  # client_id -> Reply
         
         # View change
-        self.view_change_timeout = 50000  # Base timeout for view change
+        self.view_change_timeout = 150000  # Base timeout for view change (match cluster setting)
         self.view_change_timer = initial_time + self.view_change_timeout * (1.0 + 0.5 * random.uniform(0, 1))  # Randomized
         self.view_changes: Dict[int, List[ViewChange]] = {}  # view -> [ViewChange]
         self.last_heard_from_primary = initial_time  # Track when last heard from primary
@@ -165,6 +165,10 @@ class PBFTNode:
         op = request.operation
         
         if isinstance(op, dict):
+            # Skip HEARTBEAT messages - they're just for liveness
+            if op.get("type") == "HEARTBEAT":
+                return {"status": "HEARTBEAT", "ignored": True}
+            
             if op.get("type") == "SET":
                 self.app_state[op["key"]] = op["value"]
                 return {"status": "OK", "key": op["key"], "value": op["value"]}
@@ -217,10 +221,15 @@ class PBFTNode:
         return (self.state == PBFTNode.NORMAL and 
                 current_time >= self.view_change_timer)
     
-    def create_view_change(self) -> ViewChange:
-        """Create VIEW-CHANGE message for next view"""
+    def create_view_change(self, new_view: Optional[int] = None) -> ViewChange:
+        """Create VIEW-CHANGE message.
+
+        In PBFT, replicas move to view v+1. In this simulator we allow the cluster
+        to pass an explicit target view to avoid divergent per-node view jumps.
+        """
+        target_view = (self.view + 1) if new_view is None else new_view
         return ViewChange(
-            new_view=self.view + 1,
+            new_view=target_view,
             last_stable_checkpoint=self.stable_checkpoint,
             checkpoint_proof=self.stable_checkpoint_proof[:2 * self.f + 1],
             prepared_requests=list(self.prepared_requests.values()),

@@ -13,8 +13,8 @@ from core.pbft_message import (
 # Tunable constants
 MIN_RPC_LATENCY = 5000
 MAX_RPC_LATENCY = 10000
-VIEW_CHANGE_TIMEOUT = 50000  # Reduced for faster demo (50 time units ~50 seconds)
-HEARTBEAT_INTERVAL = 20000  # Primary sends heartbeat every 20 time units
+VIEW_CHANGE_TIMEOUT = 150000  # Time before backup triggers view change
+HEARTBEAT_INTERVAL = 15000  # Logical heartbeat (timer reset), not a PBFT request
 
 
 class PBFTCluster:
@@ -35,6 +35,13 @@ class PBFTCluster:
         
         self.nodes: List[PBFTNode] = []
         self.time = 0.0
+
+        # Cluster-wide (authoritative) view.
+        # Using per-node view as the source of truth causes split-brain primary selection.
+        self.current_view = 0
+
+        # Used to avoid triggering view-change while the system is idle.
+        self.last_client_activity_time = -1e18
         
         # Message queues
         self.pre_prepares: List[PrePrepare] = []
@@ -67,6 +74,9 @@ class PBFTCluster:
         self.nodes = []
         for i in range(n):
             self.nodes.append(PBFTNode(node_id=i, total_nodes=n, initial_time=self.time))
+        # Sync all nodes to cluster view
+        for node in self.nodes:
+            node.view = self.current_view
         self.events.append(f"[t={self.time:.0f}] Created {n} nodes (f={self.f})")
         # Trim events if too long
         if len(self.events) > self.max_events:
@@ -78,6 +88,8 @@ class PBFTCluster:
             new_size = 4
         self.stop_all()
         self.time = 0.0
+        self.current_view = 0
+        self.last_client_activity_time = -1e18
         self.events.clear()
         self.clear_all_messages()
         self._create_nodes(new_size)
@@ -190,6 +202,7 @@ class PBFTCluster:
             client_id=client_id
         )
         self.pending_requests.append(request)
+        self.last_client_activity_time = self.time
         self.events.append(f"[t={self.time:.0f}] Client {client_id} request: {operation}")
     
     # -------------------------
@@ -197,23 +210,26 @@ class PBFTCluster:
     # -------------------------
     
     def send_primary_heartbeat(self):
-        """Primary sends periodic heartbeat to show it's alive"""
+        """Logical heartbeat.
+
+        PBFT liveness is normally driven by progress (receiving PRE-PREPARE/COMMIT).
+        In this simulator, we use a lightweight heartbeat that ONLY resets backup
+        view-change timers (does not create PBFT consensus messages / sequence numbers).
+        """
         primary = self.get_primary()
         if not primary or not primary.alive or primary.state != PBFTNode.NORMAL:
             return
-        
-        # Check if primary needs to send heartbeat
-        if not hasattr(primary, 'last_heartbeat'):
+
+        if not hasattr(primary, "last_heartbeat"):
             primary.last_heartbeat = self.time
-        
+
         if self.time - primary.last_heartbeat > HEARTBEAT_INTERVAL:
             primary.last_heartbeat = self.time
-            # Reset view change timers for all backups by sending empty PRE-PREPARE
             for node in self.nodes:
-                if node.id != primary.id and node.alive and node.state == PBFTNode.NORMAL:
-                    # Reset view change timer when hearing from primary
-                    node.view_change_timer = self.time + node.view_change_timeout * (1.0 + 0.5 * random.random())
-                    node.last_heard_from_primary = self.time
+                if node.id == primary.id or not node.alive or node.state != PBFTNode.NORMAL:
+                    continue
+                node.last_heard_from_primary = self.time
+                node.view_change_timer = self.time + node.view_change_timeout * (1.0 + 0.5 * random.random())
     
     def process_pending_requests(self):
         """Primary processes pending client requests"""
@@ -248,6 +264,9 @@ class PBFTCluster:
         
         # Primary adds to own log
         primary.log.add_pre_prepare(pp)
+        
+        # Update heartbeat - primary activity implies liveness
+        primary.last_heartbeat = self.time
         
         # Broadcast to backups
         self.send_pre_prepare(pp)
@@ -423,19 +442,31 @@ class PBFTCluster:
     
     def check_view_change_timeouts(self):
         """Check if any node should trigger view change"""
+        # Don't trigger view change if the system is idle (no recent client activity)
+        if not self.pending_requests and (self.time - self.last_client_activity_time) > VIEW_CHANGE_TIMEOUT:
+            return
+
         primary = self.get_primary()
+        if primary is None:
+            return
+
+        target_view = self.current_view + 1
         
         for node in self.nodes:
             if not node.alive or node.state != PBFTNode.NORMAL:
                 continue
             
-            # Skip if this is the primary
-            if node.id == (node.view % self.num_nodes):
+            # Keep nodes aligned to the cluster view
+            if node.view != self.current_view:
+                node.view = self.current_view
+
+            # Skip if this is the primary for the cluster's current view
+            if node.id == (self.current_view % self.num_nodes):
                 continue
             
             # Check if primary is dead (not alive)
             should_change = False
-            if primary and not primary.alive:
+            if not primary.alive:
                 # Primary is crashed - trigger view change immediately!
                 should_change = True
                 reason = "Primary CRASHED"
@@ -446,7 +477,7 @@ class PBFTCluster:
             
             if should_change:
                 node.state = PBFTNode.VIEW_CHANGING
-                vc = node.create_view_change()
+                vc = node.create_view_change(new_view=target_view)
                 
                 # Add to own collection
                 new_view = vc.new_view
@@ -465,6 +496,10 @@ class PBFTCluster:
         """Deliver VIEW-CHANGE messages"""
         while self.view_changes:
             vc = self.view_changes.pop(0)
+
+            # Ignore stale/old view changes
+            if vc.new_view <= self.current_view:
+                continue
             
             for node in self.nodes:
                 if not node.alive:
@@ -502,16 +537,34 @@ class PBFTCluster:
                         self.events.append(
                             f"[t={self.time:.0f}] Node {node.id} (New Primary) NEW-VIEW v={vc.new_view}"
                         )
+
+                        # Cluster enters the new view atomically
+                        self.current_view = vc.new_view
                         
                         # New primary enters new view immediately
                         node.view = vc.new_view
                         node.state = PBFTNode.NORMAL
                         node.view_change_timer = self.time + node.view_change_timeout * (1.5 + random.random())
+                        # Reset heartbeat timer for new primary
+                        node.last_heartbeat = self.time
+
+                        # Sync all alive replicas to the cluster view
+                        for other in self.nodes:
+                            if not other.alive:
+                                continue
+                            other.view = self.current_view
+                            if other.state != PBFTNode.STOPPED:
+                                other.state = PBFTNode.NORMAL
+                            other.last_heard_from_primary = self.time
+                            other.view_change_timer = self.time + other.view_change_timeout * (1.5 + random.random())
     
     def deliver_new_views(self):
         """Deliver NEW-VIEW messages and enter new view"""
         delivered = []
         for nv in self.new_views:
+            # Update cluster view as well
+            if nv.view > self.current_view:
+                self.current_view = nv.view
             for node in self.nodes:
                 if not node.alive:
                     continue
@@ -523,6 +576,8 @@ class PBFTCluster:
                 node.view = nv.view
                 node.state = PBFTNode.NORMAL
                 node.view_change_timer = self.time + node.view_change_timeout * (1.5 + random.random())
+                # NEW: Update last_heard_from_primary since we just heard from new primary via NEW-VIEW
+                node.last_heard_from_primary = self.time
                 
                 self.events.append(
                     f"[t={self.time:.0f}] Node {node.id} enters view {nv.view}"
@@ -543,22 +598,22 @@ class PBFTCluster:
         Process all protocol phases.
         """
         self.time += dt
-        
-        # Send heartbeat from primary if no activity
+
+        # View change first (so a crashed primary is replaced before we try to process requests)
+        self.check_view_change_timeouts()
+        self.deliver_view_changes()
+        self.deliver_new_views()
+
+        # Primary liveness (timer reset only)
         self.send_primary_heartbeat()
-        
+
         # Process pending client requests (primary creates PRE-PREPARE)
         self.process_pending_requests()
-        
+
         # Deliver messages in protocol order
         self.deliver_pre_prepares()  # Phase 1
         self.deliver_prepares()       # Phase 2
         self.deliver_commits()        # Phase 3
-        
-        # View change
-        self.check_view_change_timeouts()
-        self.deliver_view_changes()
-        self.deliver_new_views()
     
     # -------------------------
     # Utilities
@@ -568,8 +623,7 @@ class PBFTCluster:
         """Get current primary node"""
         if not self.nodes:
             return None
-        view = self.nodes[0].view
-        primary_id = view % self.num_nodes
+        primary_id = self.current_view % self.num_nodes
         return self.nodes[primary_id]
     
     def get_leader(self) -> Optional[int]:
@@ -588,20 +642,13 @@ class PBFTCluster:
         if 0 <= node_id < len(self.nodes):
             node = self.nodes[node_id]
             
-            # Find current view from alive nodes
-            current_view = 0
-            for other in self.nodes:
-                if other.alive and other.id != node_id:
-                    current_view = max(current_view, other.view)
-                    break
-            
-            # Restart and sync to current view
+            # Restart and sync to cluster view
             node.resume(self.time)
-            node.view = current_view  # Sync to current cluster view!
+            node.view = self.current_view
             node.state = PBFTNode.NORMAL
             node.view_change_timer = self.time + node.view_change_timeout * (1.5 + random.random())
-            
-            self.events.append(f"[t={self.time:.0f}] Node {node_id} RESTARTED (synced to view {current_view})")
+
+            self.events.append(f"[t={self.time:.0f}] Node {node_id} RESTARTED (synced to view {self.current_view})")
     
     def set_byzantine(self, node_id: int, is_byzantine: bool):
         """Mark a node as Byzantine faulty"""
