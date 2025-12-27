@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package raft;
+
+service RaftService {
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+
+  // UI calls
+  rpc GetState(Empty) returns (NodeState);
+  rpc KillNode(Empty) returns (Empty);
+  rpc Ping(PingRequest) returns (PingReply);
+
+}
+
+message Empty {}
+
+message RequestVoteRequest {
+  int32 term = 1;
+  int32 candidate_id = 2;
+}
+
+message RequestVoteResponse {
+  int32 term = 1;
+  bool vote_granted = 2;
+}
+
+message AppendEntriesRequest {
+  int32 term = 1;
+  int32 leader_id = 2;
+}
+
+message AppendEntriesResponse {
+  int32 term = 1;
+  bool success = 2;
+}
+
+message NodeState {
+  int32 node_id = 1;
+  int32 term = 2;
+  string role = 3;
+  bool alive = 4;
+}
+
+message PingRequest {}
+
+message PingReply {
+  string message = 1;
+}

@@ -1,21 +1,32 @@
 import streamlit as st
-import os
-import sys
 
-from core.cluster import Cluster
-from ui.cluster_view import render_cluster_html
+from core.cluster import ClusterManager
 from ui.sidebar import render_sidebar
+from ui.cluster_view import render_cluster_html
 
 st.set_page_config(page_title="Raft Simulator", layout="wide")
-
-cluster = Cluster(num_nodes=7)
-
 st.title("🛠️ Raft Consensus Simulator")
 
-# Sidebar
+# ============================
+# INIT CLUSTER MANAGER
+# ============================
+if "cluster" not in st.session_state:
+    st.session_state.cluster = ClusterManager()
+
+cluster = st.session_state.cluster
+
+# ============================
+# SIDEBAR
+# ============================
 render_sidebar(cluster)
 
-# Main cluster view
+# ============================
+# MAIN VIEW
+# ============================
 st.subheader("Cluster View")
-html = render_cluster_html(cluster.nodes)
-st.components.v1.html(html, height=600)
+
+if not cluster.nodes:
+    st.info("Cluster not initialized. Choose node count and start cluster.")
+else:
+    html = render_cluster_html(cluster.nodes)
+    st.components.v1.html(html, height=500)

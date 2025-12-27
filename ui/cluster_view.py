@@ -1,53 +1,35 @@
-import math
-import os
-import sys
+import streamlit as st
+from rpc.client import RaftRPCClient
 
-from utils.geometry import compute_radius, circle_position
-from core.state import state_color
+MAX_COLS = 4
 
-def render_cluster_html(nodes, node_size=70):
-    n = len(nodes)
-    radius = compute_radius(n, node_size)
-    container_size = int(2 * radius + node_size + 40)
+def render_cluster_html(nodes):
+    for i in range(0, len(nodes), MAX_COLS):
+        row = nodes[i:i + MAX_COLS]
+        cols = st.columns(len(row))
 
-    html = f"""
-    <div style="
-        width: {container_size}px;
-        height: {container_size}px;
-        position: relative;
-        margin: auto;
-        margin-top: 30px;
-    ">
-    """
+        for col, node in zip(cols, row):
+            with col:
+                alive = node["process"] is not None
+                state = "RUNNING" if alive else "STOPPED"
 
-    for i, node in enumerate(nodes):
-        x, y = circle_position(container_size, radius, i, n)
-        x -= node_size / 2
-        y -= node_size / 2
+                st.markdown(f"### 🧠 Node {node['id']}")
+                st.write(f"Port: {node['port']}")
+                st.write(f"State: {state}")
 
-        color = state_color(node.state)
-
-        html += f"""
-        <div style="
-            position: absolute;
-            top: {y}px;
-            left: {x}px;
-            width: {node_size}px;
-            height: {node_size}px;
-            border-radius: 50%;
-            background-color: {color};
-            border: 2px solid white;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            color: black;
-            font-weight: bold;
-            font-size: 25px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.3);
-        ">
-            {node.id}
-        </div>
-        """
-
-    html += "</div>"
-    return html
+                if alive:
+                    if st.button(
+                        "🔔 Ping",
+                        key=f"ping_{node['id']}"
+                    ):
+                        client = RaftRPCClient(
+                            f"localhost:{node['port']}"
+                        )
+                        result = client.ping()
+                        st.success(result)
+                else:
+                    st.button(
+                        "Ping",
+                        disabled=True,
+                        key=f"ping_{node['id']}"
+                    )
