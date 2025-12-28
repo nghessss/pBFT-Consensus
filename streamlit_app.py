@@ -1,4 +1,5 @@
 import streamlit as st
+import time
 
 from core.cluster import ClusterManager
 from ui.sidebar import render_sidebar
@@ -30,3 +31,6 @@ if not cluster.nodes:
 else:
     html = render_cluster_html(cluster.nodes)
     st.components.v1.html(html, height=500)
+
+time.sleep(0.5)
+st.rerun()

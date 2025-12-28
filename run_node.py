@@ -38,13 +38,7 @@ def main():
         pid: RaftRPCClient(addr)
         for pid, addr in peers.items()
     }
-
-    print("=" * 50)
-    print(f"[Node {args.id}] STARTING")
-    print(f"[Node {args.id}] Port : {args.port}")
-    print(f"[Node {args.id}] Peers: {list(peers.keys())}")
-    print("=" * 50)
-
+    
     # ============================
     # INIT RAFT NODE
     # ============================
@@ -54,8 +48,12 @@ def main():
         rpc_clients=clients
     )
 
+    print("=" * 50)
     node.start()
-
+    print(f"[Node {args.id}] Port : {args.port}")
+    print(f"[Node {args.id}] Peers: {list(peers.keys())}")
+    print("=" * 50)
+    
     # ============================
     # START RPC SERVER
     # ============================

@@ -7,10 +7,9 @@ service RaftService {
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
 
   // UI calls
-  rpc GetState(Empty) returns (NodeState);
   rpc KillNode(Empty) returns (Empty);
   rpc Ping(PingRequest) returns (PingReply);
-
+  rpc GetStatus (StatusRequest) returns (StatusReply);
 }
 
 message Empty {}
@@ -35,10 +34,12 @@ message AppendEntriesResponse {
   bool success = 2;
 }
 
-message NodeState {
+message StatusRequest {}
+
+message StatusReply {
   int32 node_id = 1;
-  int32 term = 2;
-  string role = 3;
+  string role = 2;
+  int32 term = 3;
   bool alive = 4;
 }
 

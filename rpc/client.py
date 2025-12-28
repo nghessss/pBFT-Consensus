@@ -23,8 +23,8 @@ class RaftRPCClient:
     def append_entries(self, **kw):
         return self.stub.AppendEntries(raft_pb2.AppendEntriesRequest(**kw))
 
-    def get_state(self):
-        return self.stub.GetState(raft_pb2.Empty())
+    def get_status(self):
+        return self.stub.GetStatus(raft_pb2.StatusRequest())
 
     def kill(self):
         return self.stub.KillNode(raft_pb2.Empty())

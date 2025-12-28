@@ -14,13 +14,13 @@ class RaftRPCServer(raft_pb2_grpc.RaftServiceServicer):
     def AppendEntries(self, req, ctx):
         return self.node.on_append_entries(req)
 
-    def GetState(self, req, ctx):
-        s = self.node.state
-        return raft_pb2.NodeState(
-            node_id=s.node_id,
-            term=s.current_term,
-            role=s.role,
-            alive=s.alive
+    def GetStatus(self, request, context):
+        state = self.node.state
+        return raft_pb2.StatusReply(
+            node_id=state.node_id,
+            role=state.role,
+            term=state.current_term,
+            alive=state.alive
         )
 
     def KillNode(self, req, ctx):

@@ -4,32 +4,40 @@ from rpc.client import RaftRPCClient
 MAX_COLS = 4
 
 def render_cluster_html(nodes):
+    MAX_COLS = 4
+
     for i in range(0, len(nodes), MAX_COLS):
-        row = nodes[i:i + MAX_COLS]
-        cols = st.columns(len(row))
+        cols = st.columns(MAX_COLS)
 
-        for col, node in zip(cols, row):
+        for col, node in zip(cols, nodes[i:i+MAX_COLS]):
             with col:
-                alive = node["process"] is not None
-                state = "RUNNING" if alive else "STOPPED"
+                if node["process"]:
+                    client = RaftRPCClient(
+                        f"localhost:{node['port']}"
+                    )
+                    try:
+                        status = client.get_status()
+                    except:
+                        st.error("Node unreachable")
 
-                st.markdown(f"### Node {node['id']}")
-                st.write(f"Port: {node['port']}")
-                st.write(f"State: {state}")
+                    color = {
+                        "Leader": "#ffcc00",
+                        "Candidate": "#ff9999",
+                        "Follower": "#99ccff"
+                    }.get(status.role, "#cccccc")
 
-                if alive:
-                    if st.button(
-                        "🔔 Ping",
-                        key=f"ping_{node['id']}"
-                    ):
-                        client = RaftRPCClient(
-                            f"localhost:{node['port']}"
-                        )
-                        result = client.ping()
-                        st.success(result)
-                else:
-                    st.button(
-                        "Ping",
-                        disabled=True,
-                        key=f"ping_{node['id']}"
+                    st.markdown(
+                        f"""
+                        <div style="
+                            border:2px solid black;
+                            padding:10px;
+                            background:{color};
+                            border-radius:8px;
+                        ">
+                        <b>Node {status.node_id}</b><br>
+                        Role: {status.role}<br>
+                        Term: {status.term}
+                        </div>
+                        """,
+                        unsafe_allow_html=True
                     )

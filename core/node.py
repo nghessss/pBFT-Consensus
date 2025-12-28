@@ -1,7 +1,7 @@
 from core.state import RaftState
 from core.raft import RaftLogic
 from rpc import raft_pb2
-
+import time
 
 class RaftNode:
     def __init__(self, node_id, peers, rpc_clients):
@@ -10,6 +10,7 @@ class RaftNode:
         self.logic = RaftLogic(self)
 
     def start(self):
+        print(f"[Node {self.state.node_id}] starting")
         self.logic.start()
 
     # RPC HANDLERS
@@ -40,6 +41,7 @@ class RaftNode:
         self.state.role = "Follower"
         self.state.last_heartbeat = time.time()
 
+        print(f"Received heartbeat from {req.leader_id}")
         return raft_pb2.AppendEntriesResponse(
             term=self.state.current_term,
             success=True
