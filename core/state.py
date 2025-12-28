@@ -1,21 +1,80 @@
-import time
+from __future__ import annotations
 
-class RaftState:
-    def __init__(self, node_id, peers):
-        # Persistent
-        self.current_term = 0
-        self.voted_for = None
-        self.log = []
+from dataclasses import dataclass, field
+from threading import Condition
+from typing import Dict, List, Optional, Set, Tuple
 
-        # Volatile
-        self.commit_index = -1
-        self.last_applied = -1
 
-        # Metadata
+@dataclass
+class PBFTEntry:
+    view: int
+    seq: int
+    digest: str
+    client_id: str
+    request_id: str
+    payload: str
+
+    prepares: Set[int] = field(default_factory=set)
+    commits: Set[int] = field(default_factory=set)
+
+    prepared: bool = False
+    committed: bool = False
+    executed: bool = False
+
+    result: Optional[str] = None
+    error: Optional[str] = None
+
+    done: Condition = field(default_factory=Condition)
+
+
+class PBFTState:
+    def __init__(self, node_id: int, peers: List[int]):
         self.node_id = node_id
         self.peers = peers
-        self.role = "Follower"
         self.alive = True
 
-        # Timing
-        self.last_heartbeat = time.time()
+        # PBFT metadata
+        self.view = 0
+        self.next_seq = 1
+
+        # (view, seq) -> entry
+        self.log: Dict[Tuple[int, int], PBFTEntry] = {}
+
+        # Buffer messages that can arrive before PRE-PREPARE due to network reordering
+        # Keyed by (view, seq, digest)
+        self.pending_prepares: Dict[Tuple[int, int, str], Set[int]] = {}
+        self.pending_commits: Dict[Tuple[int, int, str], Set[int]] = {}
+
+    @property
+    def replica_ids(self) -> List[int]:
+        return sorted([self.node_id] + list(self.peers))
+
+    @property
+    def n(self) -> int:
+        return len(self.replica_ids)
+
+    @property
+    def f(self) -> int:
+        # tolerate f Byzantine faults: n >= 3f + 1
+        return max(0, (self.n - 1) // 3)
+
+    @property
+    def primary_id(self) -> int:
+        ids = self.replica_ids
+        if not ids:
+            return self.node_id
+        return ids[self.view % len(ids)]
+
+    @property
+    def role(self) -> str:
+        return "Primary" if self.node_id == self.primary_id else "Replica"
+
+    @property
+    def quorum_prepare(self) -> int:
+        # prepared requires 2f+1 prepares (incl. self)
+        return 2 * self.f + 1
+
+    @property
+    def quorum_commit(self) -> int:
+        # committed requires 2f+1 commits
+        return 2 * self.f + 1

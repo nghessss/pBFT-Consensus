@@ -2,10 +2,10 @@ import grpc
 from rpc import raft_pb2, raft_pb2_grpc
 
 
-class RaftRPCClient:
+class PBFTClient:
     def __init__(self, addr):
         channel = grpc.insecure_channel(addr)
-        self.stub = raft_pb2_grpc.RaftServiceStub(channel)
+        self.stub = raft_pb2_grpc.PBFTServiceStub(channel)
         
     def ping(self, timeout=1.0):
         try:
@@ -17,11 +17,17 @@ class RaftRPCClient:
         except Exception as e:
             return f"ERROR: {e}"
 
-    def request_vote(self, **kw):
-        return self.stub.RequestVote(raft_pb2.RequestVoteRequest(**kw))
+    def client_request(self, req: raft_pb2.ClientRequest, timeout=30.0):
+        return self.stub.SubmitRequest(req, timeout=timeout)
 
-    def append_entries(self, **kw):
-        return self.stub.AppendEntries(raft_pb2.AppendEntriesRequest(**kw))
+    def pre_prepare(self, req: raft_pb2.PrePrepareRequest, timeout=5.0):
+        return self.stub.PrePrepare(req, timeout=timeout)
+
+    def prepare(self, req: raft_pb2.PrepareRequest, timeout=5.0):
+        return self.stub.Prepare(req, timeout=timeout)
+
+    def commit(self, req: raft_pb2.CommitRequest, timeout=5.0):
+        return self.stub.Commit(req, timeout=timeout)
 
     def get_status(self):
         return self.stub.GetStatus(raft_pb2.StatusRequest())

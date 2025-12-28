@@ -2,9 +2,9 @@ import argparse
 import time
 import traceback
 
-from core.node import RaftNode
+from core.node import PBFTNode
 from rpc.server import serve
-from rpc.client import RaftRPCClient
+from rpc.client import PBFTClient
 
 
 def main():
@@ -34,15 +34,12 @@ def main():
     # ============================
     # INIT RPC CLIENTS
     # ============================
-    clients = {
-        pid: RaftRPCClient(addr)
-        for pid, addr in peers.items()
-    }
+    clients = {pid: PBFTClient(addr) for pid, addr in peers.items()}
     
     # ============================
     # INIT RAFT NODE
     # ============================
-    node = RaftNode(
+    node = PBFTNode(
         node_id=args.id,
         peers=list(peers.keys()),
         rpc_clients=clients

@@ -4,23 +4,31 @@ from concurrent import futures
 from rpc import raft_pb2, raft_pb2_grpc
 
 
-class RaftRPCServer(raft_pb2_grpc.RaftServiceServicer):
+class PBFTServer(raft_pb2_grpc.PBFTServiceServicer):
     def __init__(self, node):
         self.node = node
 
-    def RequestVote(self, req, ctx):
-        return self.node.on_request_vote(req)
+    def SubmitRequest(self, req, ctx):
+        return self.node.on_client_request(req)
 
-    def AppendEntries(self, req, ctx):
-        return self.node.on_append_entries(req)
+    def PrePrepare(self, req, ctx):
+        return self.node.on_pre_prepare(req)
+
+    def Prepare(self, req, ctx):
+        return self.node.on_prepare(req)
+
+    def Commit(self, req, ctx):
+        return self.node.on_commit(req)
 
     def GetStatus(self, request, context):
         state = self.node.state
         return raft_pb2.StatusReply(
             node_id=state.node_id,
             role=state.role,
-            term=state.current_term,
-            alive=state.alive
+            view=state.view,
+            alive=state.alive,
+            primary_id=state.primary_id,
+            f=state.f,
         )
 
     def KillNode(self, req, ctx):
@@ -36,8 +44,8 @@ class RaftRPCServer(raft_pb2_grpc.RaftServiceServicer):
 
 def serve(node, port):
     server = grpc.server(futures.ThreadPoolExecutor(10))
-    raft_pb2_grpc.add_RaftServiceServicer_to_server(
-        RaftRPCServer(node), server
+    raft_pb2_grpc.add_PBFTServiceServicer_to_server(
+        PBFTServer(node), server
     )
     server.add_insecure_port(f"[::]:{port}")
     server.start()

@@ -1,5 +1,5 @@
 import streamlit as st
-from rpc.client import RaftRPCClient
+from rpc.client import PBFTClient
 
 MAX_COLS = 4
 
@@ -12,7 +12,7 @@ def render_cluster_html(nodes):
         for col, node in zip(cols, nodes[i:i+MAX_COLS]):
             with col:
                 if node["process"]:
-                    client = RaftRPCClient(
+                    client = PBFTClient(
                         f"localhost:{node['port']}"
                     )
                     try:
@@ -21,9 +21,8 @@ def render_cluster_html(nodes):
                         st.error("Node unreachable")
 
                     color = {
-                        "Leader": "#ffcc00",
-                        "Candidate": "#ff9999",
-                        "Follower": "#99ccff"
+                        "Primary": "#ffcc00",
+                        "Replica": "#99ccff",
                     }.get(status.role, "#cccccc")
 
                     st.markdown(
@@ -36,7 +35,9 @@ def render_cluster_html(nodes):
                         ">
                         <b>Node {status.node_id}</b><br>
                         Role: {status.role}<br>
-                        Term: {status.term}
+                        View: {status.view}<br>
+                        Primary: {status.primary_id}<br>
+                        f: {status.f}
                         </div>
                         """,
                         unsafe_allow_html=True

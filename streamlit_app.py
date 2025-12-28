@@ -5,8 +5,8 @@ from core.cluster import ClusterManager
 from ui.sidebar import render_sidebar
 from ui.cluster_view import render_cluster_html
 
-st.set_page_config(page_title="Raft Simulator", layout="wide")
-st.title("🛠️ Raft Consensus Simulator")
+st.set_page_config(page_title="PBFT Simulator", layout="wide")
+st.title("🛠️ PBFT Consensus Simulator")
 
 # ============================
 # INIT CLUSTER MANAGER
