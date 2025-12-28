@@ -182,6 +182,41 @@ class PBFTNode:
         
         # Default: just echo the operation
         return {"status": "EXECUTED", "operation": op}
+
+    def execute_committed_in_order(self):
+        """Execute as many committed-local requests as possible in sequence order.
+
+        PBFT replicas may *commit* out of order, but must *execute* in order.
+        This helper is important for recovery when a node previously skipped
+        execution (e.g., it was marked Byzantine) and later becomes correct.
+
+        Returns:
+            (executed_any, last_executed_seq, last_result)
+        """
+        executed_any = False
+        last_result: Any = None
+
+        while True:
+            next_seq = self.last_executed + 1
+            if next_seq not in self.log.pre_prepares:
+                break
+            pp = self.log.pre_prepares[next_seq]
+
+            if not self.is_committed_local(next_seq, pp.view, pp.digest):
+                break
+
+            last_result = self.execute_request(pp.request)
+            self.last_executed = next_seq
+            executed_any = True
+
+            if self.should_checkpoint():
+                state_digest = self.compute_state_digest()
+                ckpt = Checkpoint(sequence=self.last_executed, state_digest=state_digest, replica_id=self.id)
+                self.log.add_checkpoint(ckpt)
+
+            self.advance_stable_checkpoint()
+
+        return executed_any, self.last_executed, last_result
     
     def should_checkpoint(self) -> bool:
         """Check if should take checkpoint now"""

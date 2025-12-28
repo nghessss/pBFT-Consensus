@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package pbft;
+
+service PBFTNodeService {
+  // Debug/testing: used to verify gRPC concurrency in practice.
+  rpc Ping(PingRequest) returns (PingReply);
+
+  rpc ReceivePrePrepare(PrePrepareMsg) returns (PrePrepareResponse);
+  rpc ReceivePrepare(PrepareMsg) returns (PrepareResponse);
+  rpc ReceiveCommit(CommitMsg) returns (CommitResponse);
+  rpc ReceiveCheckpoint(CheckpointMsg) returns (Ack);
+
+  rpc ReceiveViewChange(ViewChangeMsg) returns (Ack);
+  rpc ReceiveNewView(NewViewMsg) returns (Ack);
+
+  rpc GetStatus(Empty) returns (NodeStatus);
+  rpc Crash(Empty) returns (Ack);
+  rpc Restart(TimeMsg) returns (Ack);
+  rpc SetByzantine(BoolMsg) returns (Ack);
+}
+
+message Empty {}
+
+message PingRequest {
+  int32 sleep_ms = 1;
+}
+
+message PingReply {
+  bool ok = 1;
+  int32 node_id = 2;
+  int32 slept_ms = 3;
+  string server_time_iso = 4;
+}
+
+message Ack {
+  bool ok = 1;
+  string error = 2;
+}
+
+message BoolMsg { bool value = 1; }
+message TimeMsg { double current_time = 1; }
+
+message RequestMsg {
+  string operation_json = 1;
+  double timestamp = 2;
+  int32 client_id = 3;
+  string digest = 4;
+}
+
+message PrePrepareMsg {
+  int32 view = 1;
+  int64 sequence = 2;
+  string digest = 3;
+  RequestMsg request = 4;
+  int32 primary_id = 5;
+  double send_time = 6;
+  double recv_time = 7;
+}
+
+message PrepareMsg {
+  int32 view = 1;
+  int64 sequence = 2;
+  string digest = 3;
+  int32 replica_id = 4;
+  double send_time = 5;
+  double recv_time = 6;
+}
+
+message CommitMsg {
+  int32 view = 1;
+  int64 sequence = 2;
+  string digest = 3;
+  int32 replica_id = 4;
+  double send_time = 5;
+  double recv_time = 6;
+}
+
+message CheckpointMsg {
+  int64 sequence = 1;
+  string state_digest = 2;
+  int32 replica_id = 3;
+}
+
+message ViewChangeMsg {
+  int32 new_view = 1;
+  int64 last_stable_checkpoint = 2;
+  repeated CheckpointMsg checkpoint_proof = 3;
+  repeated string prepared_requests_json = 4;
+  int32 replica_id = 5;
+}
+
+message NewViewMsg {
+  int32 view = 1;
+  repeated ViewChangeMsg view_changes = 2;
+  int32 primary_id = 3;
+}
+
+message PrePrepareResponse {
+  bool accepted = 1;
+  PrepareMsg prepare = 2;
+  bool has_prepare = 3;
+  string error = 4;
+}
+
+message PrepareResponse {
+  bool accepted = 1;
+  CommitMsg commit = 2;
+  bool has_commit = 3;
+  string error = 4;
+}
+
+message CommitResponse {
+  bool accepted = 1;
+  bool executed = 2;
+  int64 executed_sequence = 3;
+  string result_json = 4;
+  CheckpointMsg checkpoint = 5;
+  bool has_checkpoint = 6;
+  string error = 7;
+}
+
+message NodeStatus {
+  int32 id = 1;
+  int32 view = 2;
+  string state = 3;
+  bool is_primary = 4;
+  int64 sequence_number = 5;
+  int64 last_executed = 6;
+  int64 stable_checkpoint = 7;
+  int64 low_water_mark = 8;
+  int64 high_water_mark = 9;
+  string app_state_json = 10;
+  bool alive = 11;
+  bool is_byzantine = 12;
+  int32 f = 13;
+}

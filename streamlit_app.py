@@ -128,36 +128,6 @@ with col1:
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 with col2:
-    st.subheader("📊 Cluster Status")
-    
-    status = cluster.get_status()
-    
-    st.metric("Logical Time", f"{status['time']:.0f}")
-    st.metric("Current View", cluster.nodes[0].view if cluster.nodes else 0)
-    st.metric("Running", "Yes ✅" if status['running'] else "No ⛔")
-    
-    # Alive nodes
-    alive_count = sum(1 for n in cluster.nodes if n.alive)
-    st.metric("Alive Nodes", f"{alive_count}/{cluster.num_nodes}")
-    
-    # Byzantine nodes
-    byz_count = sum(1 for n in cluster.nodes if n.is_byzantine)
-    st.metric("Byzantine Nodes", f"{byz_count}/{cluster.f} max")
-    
-    # Pending requests
-    st.metric("Pending Requests", len(cluster.pending_requests))
-    
-    # Show last executed values from primary
-    if cluster.nodes:
-        primary = cluster.get_primary()
-        if primary and primary.app_state:
-            st.markdown("**📦 Application State:**")
-            for k, v in list(primary.app_state.items())[:5]:
-                st.text(f"{k} = {v}")
-    
-    st.markdown("---")
-    
-    # Recent events
     st.subheader("📜 Recent Events")
     events = cluster.get_events(100)  # Get more events
     if events:
@@ -176,6 +146,35 @@ with col2:
                 st.text(event)
     else:
         st.info("👆 Click buttons above to submit requests and see consensus in action!")
+
+    st.markdown("---")
+
+    st.subheader("📊 Cluster Status")
+
+    status = cluster.get_status()
+
+    st.metric("Logical Time", f"{status['time']:.0f}")
+    st.metric("Current View", cluster.nodes[0].view if cluster.nodes else 0)
+    st.metric("Running", "Yes ✅" if status['running'] else "No ⛔")
+
+    # Alive nodes
+    alive_count = sum(1 for n in cluster.nodes if n.alive)
+    st.metric("Alive Nodes", f"{alive_count}/{cluster.num_nodes}")
+
+    # Byzantine nodes
+    byz_count = sum(1 for n in cluster.nodes if n.is_byzantine)
+    st.metric("Byzantine Nodes", f"{byz_count}/{cluster.f} max")
+
+    # Pending requests
+    st.metric("Pending Requests", len(cluster.pending_requests))
+
+    # Show last executed values from primary
+    if cluster.nodes:
+        primary = cluster.get_primary()
+        if primary and primary.app_state:
+            st.markdown("**📦 Application State:**")
+            for k, v in list(primary.app_state.items())[:5]:
+                st.text(f"{k} = {v}")
 
 # Auto-refresh mechanism when cluster is running
 if cluster.is_running():

@@ -3,12 +3,18 @@ import random
 import threading
 import time
 from copy import deepcopy
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
+
+import grpc
+
 from core.pbft_node import PBFTNode
 from core.pbft_message import (
     Request, PrePrepare, Prepare, Commit, Reply,
     Checkpoint, ViewChange, NewView
 )
+
+from core import pbft_rpc
+from rpc import pbft_pb2, pbft_pb2_grpc
 
 # Tunable constants
 MIN_RPC_LATENCY = 5000
@@ -44,11 +50,13 @@ class PBFTCluster:
         self.last_client_activity_time = -1e18
         
         # Message queues
-        self.pre_prepares: List[PrePrepare] = []
-        self.prepares: List[Prepare] = []
-        self.commits: List[Commit] = []
-        self.view_changes: List[ViewChange] = []
-        self.new_views: List[NewView] = []
+        # Queues store (recv_time, target_id, message)
+        self.pre_prepares: List[Tuple[float, int, PrePrepare]] = []
+        self.prepares: List[Tuple[float, int, Prepare]] = []
+        self.commits: List[Tuple[float, int, Commit]] = []
+        self.checkpoints: List[Tuple[float, int, Checkpoint]] = []
+        self.view_changes: List[Tuple[float, int, ViewChange]] = []
+        self.new_views: List[Tuple[float, int, NewView]] = []
         
         # Client request queue
         self.pending_requests: List[Request] = []
@@ -66,14 +74,57 @@ class PBFTCluster:
         self._real_start = None
         self._logical_start = None
         self.speed = 1.0
+
+        # gRPC per-node servers + stubs (multi-threaded node runtime)
+        self._base_port = 50050
+        self._rpc_servers: Dict[int, grpc.Server] = {}
+        self._rpc_channels: Dict[int, grpc.Channel] = {}
+        self._rpc_stubs: Dict[int, pbft_pb2_grpc.PBFTNodeServiceStub] = {}
+        self._rpc_ports: Dict[int, int] = {}
+
+        # RPC call timeout (seconds) to avoid UI hangs
+        self._rpc_timeout_s = 0.5
         
         self._create_nodes(num_nodes)
+
+    def close(self):
+        """Stop background threads/servers (useful for scripts/tests)."""
+        try:
+            self.stop_all()
+        finally:
+            self._stop_rpc()
+
+    def __del__(self):
+        try:
+            self._stop_rpc()
+        except Exception:
+            pass
     
     def _create_nodes(self, n: int):
         """Create n replica nodes"""
+        # Stop any existing RPC servers before recreating.
+        self._stop_rpc()
+
         self.nodes = []
         for i in range(n):
             self.nodes.append(PBFTNode(node_id=i, total_nodes=n, initial_time=self.time))
+
+        # Start per-node gRPC servers (each node runs independently in its own server thread pool)
+        for node in self.nodes:
+            port = self._base_port + node.id
+            self._rpc_ports[node.id] = port
+            self._rpc_servers[node.id] = pbft_rpc.start_node_server(node, port)
+            ch = grpc.insecure_channel(f"127.0.0.1:{port}")
+            self._rpc_channels[node.id] = ch
+            self._rpc_stubs[node.id] = pbft_pb2_grpc.PBFTNodeServiceStub(ch)
+
+        # Ensure channels are ready before first tick.
+        for node_id, ch in self._rpc_channels.items():
+            try:
+                grpc.channel_ready_future(ch).result(timeout=2.0)
+            except Exception:
+                self.events.append(f"[t={self.time:.0f}] Warning: gRPC channel for node {node_id} not ready")
+
         # Sync all nodes to cluster view
         for node in self.nodes:
             node.view = self.current_view
@@ -101,9 +152,43 @@ class PBFTCluster:
         self.pre_prepares.clear()
         self.prepares.clear()
         self.commits.clear()
+        self.checkpoints.clear()
         self.view_changes.clear()
         self.new_views.clear()
         self.pending_requests.clear()
+
+    def _stop_rpc(self):
+        """Stop all gRPC servers/channels."""
+        for server in list(self._rpc_servers.values()):
+            try:
+                stop_future = server.stop(0)
+                try:
+                    stop_future.wait(timeout=1)
+                except Exception:
+                    pass
+                try:
+                    server.wait_for_termination(timeout=1)
+                except Exception:
+                    pass
+                executor = getattr(server, "_pbft_executor", None)
+                if executor is not None:
+                    try:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    except TypeError:
+                        # Older Python: cancel_futures not available
+                        executor.shutdown(wait=False)
+            except Exception:
+                pass
+        self._rpc_servers.clear()
+
+        for ch in list(self._rpc_channels.values()):
+            try:
+                ch.close()
+            except Exception:
+                pass
+        self._rpc_channels.clear()
+        self._rpc_stubs.clear()
+        self._rpc_ports.clear()
     
     # -------------------------
     # Threading control
@@ -147,14 +232,13 @@ class PBFTCluster:
         return MIN_RPC_LATENCY + random.random() * (MAX_RPC_LATENCY - MIN_RPC_LATENCY)
     
     def send_pre_prepare(self, pp: PrePrepare):
-        """Broadcast PRE-PREPARE message to all backups"""
+        """Broadcast PRE-PREPARE message to all replicas (including primary)"""
         for i in range(self.num_nodes):
-            if i == pp.primary_id:
-                continue  # Skip primary (already has it)
             p = deepcopy(pp)
             p.send_time = self.time
-            p.recv_time = self.time + self.randint_latency()
-            self.pre_prepares.append(p)
+            latency = 0.0 if i == pp.primary_id else self.randint_latency()
+            p.recv_time = self.time + latency
+            self.pre_prepares.append((p.recv_time, i, p))
     
     def broadcast_prepare(self, prep: Prepare):
         """Broadcast PREPARE to all nodes"""
@@ -164,7 +248,7 @@ class PBFTCluster:
             p = deepcopy(prep)
             p.send_time = self.time
             p.recv_time = self.time + self.randint_latency()
-            self.prepares.append(p)
+            self.prepares.append((p.recv_time, i, p))
     
     def broadcast_commit(self, commit: Commit):
         """Broadcast COMMIT to all nodes"""
@@ -174,18 +258,27 @@ class PBFTCluster:
             c = deepcopy(commit)
             c.send_time = self.time
             c.recv_time = self.time + self.randint_latency()
-            self.commits.append(c)
+            self.commits.append((c.recv_time, i, c))
+
+    def broadcast_checkpoint(self, ckpt: Checkpoint):
+        """Broadcast CHECKPOINT to all other nodes"""
+        for i in range(self.num_nodes):
+            if i == ckpt.replica_id:
+                continue
+            cp = deepcopy(ckpt)
+            recv_time = self.time + self.randint_latency()
+            self.checkpoints.append((recv_time, i, cp))
     
     def broadcast_view_change(self, vc: ViewChange):
         """Broadcast VIEW-CHANGE to all nodes"""
         for i in range(self.num_nodes):
             v = deepcopy(vc)
-            self.view_changes.append(v)
+            self.view_changes.append((self.time, i, v))
     
     def broadcast_new_view(self, nv: NewView):
         """Broadcast NEW-VIEW to all nodes"""
         for i in range(self.num_nodes):
-            self.new_views.append(deepcopy(nv))
+            self.new_views.append((self.time, i, deepcopy(nv)))
     
     # -------------------------
     # Client operations
@@ -261,14 +354,9 @@ class PBFTCluster:
             request=request,
             primary_id=primary.id
         )
-        
-        # Primary adds to own log
-        primary.log.add_pre_prepare(pp)
-        
-        # Update heartbeat - primary activity implies liveness
+
+        # Broadcast PRE-PREPARE via gRPC (delivery scheduled with simulated latency)
         primary.last_heartbeat = self.time
-        
-        # Broadcast to backups
         self.send_pre_prepare(pp)
         
         self.events.append(
@@ -277,164 +365,91 @@ class PBFTCluster:
     
     def deliver_pre_prepares(self):
         """Deliver PRE-PREPARE messages to backups"""
-        ready = [pp for pp in self.pre_prepares if pp.recv_time <= self.time]
-        self.pre_prepares = [pp for pp in self.pre_prepares if pp.recv_time > self.time]
-        
-        for pp in ready:
-            # Find the target node for this message copy
-            target_nodes = [node for node in self.nodes if node.id != pp.primary_id]
-            
-            for node in target_nodes:
-                if not node.alive or node.state != PBFTNode.NORMAL:
-                    continue
-                
-                # Check if backup accepts PRE-PREPARE
-                if not node.accept_pre_prepare(pp):
-                    continue
-                
-                # Check if already processed this pre-prepare
-                if pp.sequence in node.log.pre_prepares:
-                    continue
-                
-                # Add to log
-                node.log.add_pre_prepare(pp)
-                
-                # Reset view change timer - heard from primary
-                node.view_change_timer = self.time + node.view_change_timeout * (1.0 + 0.5 * random.random())
-                node.last_heard_from_primary = self.time
-                
-                # Send PREPARE
-                prepare = Prepare(
-                    view=pp.view,
-                    sequence=pp.sequence,
-                    digest=pp.digest,
-                    replica_id=node.id
+        ready = [(rt, tid, pp) for (rt, tid, pp) in self.pre_prepares if rt <= self.time]
+        self.pre_prepares = [(rt, tid, pp) for (rt, tid, pp) in self.pre_prepares if rt > self.time]
+
+        for _rt, target_id, pp in ready:
+            node = self.nodes[target_id]
+            if not node.alive or node.state != PBFTNode.NORMAL:
+                continue
+
+            try:
+                resp = self._rpc_stubs[target_id].ReceivePrePrepare(
+                    pbft_rpc._to_pre_prepare_msg(pp), timeout=self._rpc_timeout_s
                 )
-                
-                # Add to own log first
-                node.log.add_prepare(prepare)
-                
-                # Broadcast to others
+            except Exception as e:
+                self.events.append(f"[t={self.time:.0f}] RPC ReceivePrePrepare to Node {target_id} failed: {e}")
+                continue
+
+            if resp.accepted and resp.has_prepare:
+                prepare = pbft_rpc._from_prepare_msg(resp.prepare)
                 self.broadcast_prepare(prepare)
-                
-                self.events.append(
-                    f"[t={self.time:.0f}] Node {node.id} sends PREPARE n={pp.sequence}"
-                )
-                break  # Only process once per node
+                self.events.append(f"[t={self.time:.0f}] Node {target_id} sends PREPARE n={prepare.sequence}")
     
     def deliver_prepares(self):
         """Deliver PREPARE messages to replicas"""
-        ready = [p for p in self.prepares if p.recv_time <= self.time]
-        self.prepares = [p for p in self.prepares if p.recv_time > self.time]
-        
-        for prep in ready:
-            # Deliver to all nodes except sender
-            for node in self.nodes:
-                if node.id == prep.replica_id:
-                    continue  # Already in sender's log
-                
-                if not node.alive or node.state != PBFTNode.NORMAL:
-                    continue
-                
-                if prep.view != node.view:
-                    continue
-                
-                # Add to log (will check for duplicates internally)
-                node.log.add_prepare(prep)
-            
-            # Now check all nodes if they reached prepared state
-            for node in self.nodes:
-                if not node.alive or node.state != PBFTNode.NORMAL:
-                    continue
-                    
-                # Check if prepared
-                if node.is_prepared(prep.sequence, prep.view, prep.digest):
-                    # Mark as prepared (for view change)
-                    if prep.sequence not in node.prepared_requests:
-                        node.prepared_requests[prep.sequence] = {
-                            "view": prep.view,
-                            "digest": prep.digest,
-                            "sequence": prep.sequence
-                        }
-                    
-                    # Check if already sent commit for this
-                    existing_commits = node.log.get_commits(prep.sequence, prep.view, prep.digest)
-                    already_sent = any(c.replica_id == node.id for c in existing_commits)
-                    
-                    if not already_sent:
-                        # Send COMMIT
-                        commit = Commit(
-                            view=prep.view,
-                            sequence=prep.sequence,
-                            digest=prep.digest,
-                            replica_id=node.id
-                        )
-                        
-                        # Add to own log
-                        node.log.add_commit(commit)
-                        
-                        # Broadcast
-                        self.broadcast_commit(commit)
-                        
-                        self.events.append(
-                            f"[t={self.time:.0f}] Node {node.id} prepared & sends COMMIT n={prep.sequence}"
-                        )
+        ready = [(rt, tid, p) for (rt, tid, p) in self.prepares if rt <= self.time]
+        self.prepares = [(rt, tid, p) for (rt, tid, p) in self.prepares if rt > self.time]
+
+        for _rt, target_id, prep in ready:
+            node = self.nodes[target_id]
+            if not node.alive or node.state != PBFTNode.NORMAL:
+                continue
+
+            try:
+                resp = self._rpc_stubs[target_id].ReceivePrepare(
+                    pbft_rpc._to_prepare_msg(prep), timeout=self._rpc_timeout_s
+                )
+            except Exception as e:
+                self.events.append(f"[t={self.time:.0f}] RPC ReceivePrepare to Node {target_id} failed: {e}")
+                continue
+
+            if resp.accepted and resp.has_commit:
+                commit = pbft_rpc._from_commit_msg(resp.commit)
+                self.broadcast_commit(commit)
+                self.events.append(f"[t={self.time:.0f}] Node {target_id} prepared & sends COMMIT n={commit.sequence}")
     
     def deliver_commits(self):
         """Deliver COMMIT messages and execute requests"""
-        ready = [c for c in self.commits if c.recv_time <= self.time]
-        self.commits = [c for c in self.commits if c.recv_time > self.time]
-        
-        for com in ready:
-            # Deliver to all nodes
-            for node in self.nodes:
-                if node.id == com.replica_id:
-                    continue  # Already in sender's log
-                
-                if not node.alive or node.state != PBFTNode.NORMAL:
-                    continue
-                
-                if com.view != node.view:
-                    continue
-                
-                # Add to log
-                node.log.add_commit(com)
-                
-                # Check if committed-local
-                if node.is_committed_local(com.sequence, com.view, com.digest):
-                    # Execute if not already executed
-                    if com.sequence == node.last_executed + 1:
-                        # Get the request
-                        if com.sequence in node.log.pre_prepares:
-                            pp = node.log.pre_prepares[com.sequence]
-                            result = node.execute_request(pp.request)
-                            node.last_executed = com.sequence
-                            
-                            self.events.append(
-                                f"[t={self.time:.0f}] Node {node.id} EXECUTED n={com.sequence} result={result}"
-                            )
-                            
-                            # Check if should checkpoint
-                            if node.should_checkpoint():
-                                state_digest = node.compute_state_digest()
-                                ckpt = Checkpoint(
-                                    sequence=node.last_executed,
-                                    state_digest=state_digest,
-                                    replica_id=node.id
-                                )
-                                node.log.add_checkpoint(ckpt)
-                                
-                                # Broadcast checkpoint (simplified - just add to all nodes)
-                                for other in self.nodes:
-                                    if other.id != node.id:
-                                        other.log.add_checkpoint(ckpt)
-                                
-                                self.events.append(
-                                    f"[t={self.time:.0f}] Node {node.id} CHECKPOINT n={node.last_executed}"
-                                )
-                            
-                            # Advance stable checkpoint if possible
-                            node.advance_stable_checkpoint()
+        ready = [(rt, tid, c) for (rt, tid, c) in self.commits if rt <= self.time]
+        self.commits = [(rt, tid, c) for (rt, tid, c) in self.commits if rt > self.time]
+
+        for _rt, target_id, com in ready:
+            node = self.nodes[target_id]
+            if not node.alive or node.state != PBFTNode.NORMAL:
+                continue
+
+            try:
+                resp = self._rpc_stubs[target_id].ReceiveCommit(
+                    pbft_rpc._to_commit_msg(com), timeout=self._rpc_timeout_s
+                )
+            except Exception as e:
+                self.events.append(f"[t={self.time:.0f}] RPC ReceiveCommit to Node {target_id} failed: {e}")
+                continue
+
+            if resp.accepted and resp.executed:
+                self.events.append(
+                    f"[t={self.time:.0f}] Node {target_id} EXECUTED n={resp.executed_sequence} result={resp.result_json}"
+                )
+            if resp.accepted and resp.has_checkpoint:
+                ckpt = pbft_rpc._from_checkpoint_msg(resp.checkpoint)
+                self.broadcast_checkpoint(ckpt)
+                self.events.append(f"[t={self.time:.0f}] Node {target_id} CHECKPOINT n={ckpt.sequence}")
+
+    def deliver_checkpoints(self):
+        ready = [(rt, tid, ck) for (rt, tid, ck) in self.checkpoints if rt <= self.time]
+        self.checkpoints = [(rt, tid, ck) for (rt, tid, ck) in self.checkpoints if rt > self.time]
+
+        for _rt, target_id, ckpt in ready:
+            node = self.nodes[target_id]
+            if not node.alive:
+                continue
+            try:
+                self._rpc_stubs[target_id].ReceiveCheckpoint(
+                    pbft_rpc._to_checkpoint_msg(ckpt), timeout=self._rpc_timeout_s
+                )
+            except Exception as e:
+                self.events.append(f"[t={self.time:.0f}] RPC ReceiveCheckpoint to Node {target_id} failed: {e}")
     
     # -------------------------
     # View change protocol
@@ -495,98 +510,85 @@ class PBFTCluster:
     def deliver_view_changes(self):
         """Deliver VIEW-CHANGE messages"""
         while self.view_changes:
-            vc = self.view_changes.pop(0)
+            _rt, target_id, vc = self.view_changes.pop(0)
 
             # Ignore stale/old view changes
             if vc.new_view <= self.current_view:
                 continue
-            
-            for node in self.nodes:
-                if not node.alive:
-                    continue
-                
-                # Accept view change even if in ViewChanging state
-                if vc.new_view <= node.view:
-                    continue  # Already in this view or later
-                
-                # Add to collection
-                if vc.new_view not in node.view_changes:
-                    node.view_changes[vc.new_view] = []
-                
-                # Avoid duplicates
-                if not any(v.replica_id == vc.replica_id for v in node.view_changes[vc.new_view]):
-                    node.view_changes[vc.new_view].append(vc)
-                
-                # Check if this node is new primary and has quorum
-                new_primary_id = vc.new_view % self.num_nodes
-                if node.id == new_primary_id and node.has_quorum_view_changes(vc.new_view):
-                    # Check if NEW-VIEW already sent for this view
-                    already_sent = any(nv.view == vc.new_view for nv in self.new_views)
-                    if not already_sent:
-                        # Create NEW-VIEW
-                        nv = NewView(
-                            view=vc.new_view,
-                            view_changes=node.view_changes[vc.new_view][:2 * node.f + 1],
-                            pre_prepares=[],  # Simplified: don't reprocess old requests
-                            primary_id=node.id
-                        )
-                        
-                        # Broadcast NEW-VIEW
-                        self.broadcast_new_view(nv)
-                        
-                        self.events.append(
-                            f"[t={self.time:.0f}] Node {node.id} (New Primary) NEW-VIEW v={vc.new_view}"
-                        )
 
-                        # Cluster enters the new view atomically
-                        self.current_view = vc.new_view
-                        
-                        # New primary enters new view immediately
-                        node.view = vc.new_view
-                        node.state = PBFTNode.NORMAL
-                        node.view_change_timer = self.time + node.view_change_timeout * (1.5 + random.random())
-                        # Reset heartbeat timer for new primary
-                        node.last_heartbeat = self.time
+            # Deliver via RPC to the intended target
+            node = self.nodes[target_id]
+            if not node.alive:
+                continue
+            try:
+                self._rpc_stubs[target_id].ReceiveViewChange(
+                    pbft_rpc._to_view_change_msg(vc), timeout=self._rpc_timeout_s
+                )
+            except Exception as e:
+                self.events.append(f"[t={self.time:.0f}] RPC ReceiveViewChange to Node {target_id} failed: {e}")
+                continue
 
-                        # Sync all alive replicas to the cluster view
-                        for other in self.nodes:
-                            if not other.alive:
-                                continue
-                            other.view = self.current_view
-                            if other.state != PBFTNode.STOPPED:
-                                other.state = PBFTNode.NORMAL
-                            other.last_heard_from_primary = self.time
-                            other.view_change_timer = self.time + other.view_change_timeout * (1.5 + random.random())
+            # Check if new primary has quorum (quorum is tracked inside node.view_changes)
+            new_primary_id = vc.new_view % self.num_nodes
+            new_primary = self.nodes[new_primary_id]
+            if new_primary.alive and new_primary.has_quorum_view_changes(vc.new_view):
+                already_sent = any(nv.view == vc.new_view for (_rt2, _tid2, nv) in self.new_views)
+                if not already_sent:
+                    nv = NewView(
+                        view=vc.new_view,
+                        view_changes=new_primary.view_changes[vc.new_view][:2 * new_primary.f + 1],
+                        pre_prepares=[],
+                        primary_id=new_primary_id,
+                    )
+                    self.broadcast_new_view(nv)
+                    self.events.append(f"[t={self.time:.0f}] Node {new_primary_id} (New Primary) NEW-VIEW v={vc.new_view}")
+
+                    self.current_view = vc.new_view
+                    # Sync all alive replicas to the cluster view
+                    for other in self.nodes:
+                        if not other.alive:
+                            continue
+                        other.view = self.current_view
+                        if other.state != PBFTNode.STOPPED:
+                            other.state = PBFTNode.NORMAL
+                        other.last_heard_from_primary = self.time
+                        other.view_change_timer = self.time + other.view_change_timeout * (1.5 + random.random())
     
     def deliver_new_views(self):
         """Deliver NEW-VIEW messages and enter new view"""
         delivered = []
-        for nv in self.new_views:
+        for rt, target_id, nv in self.new_views:
+            if rt > self.time:
+                continue
             # Update cluster view as well
             if nv.view > self.current_view:
                 self.current_view = nv.view
-            for node in self.nodes:
-                if not node.alive:
-                    continue
-                
-                if node.view >= nv.view:
-                    continue  # Already in this view or later
-                
-                # Enter new view
-                node.view = nv.view
-                node.state = PBFTNode.NORMAL
-                node.view_change_timer = self.time + node.view_change_timeout * (1.5 + random.random())
-                # NEW: Update last_heard_from_primary since we just heard from new primary via NEW-VIEW
-                node.last_heard_from_primary = self.time
-                
-                self.events.append(
-                    f"[t={self.time:.0f}] Node {node.id} enters view {nv.view}"
+            node = self.nodes[target_id]
+            if not node.alive:
+                delivered.append((rt, target_id, nv))
+                continue
+
+            try:
+                self._rpc_stubs[target_id].ReceiveNewView(
+                    pbft_rpc._to_new_view_msg(nv), timeout=self._rpc_timeout_s
                 )
-            delivered.append(nv)
+            except Exception as e:
+                self.events.append(f"[t={self.time:.0f}] RPC ReceiveNewView to Node {target_id} failed: {e}")
+                delivered.append((rt, target_id, nv))
+                continue
+
+            if node.view < nv.view:
+                node.view = nv.view
+            node.state = PBFTNode.NORMAL
+            node.view_change_timer = self.time + node.view_change_timeout * (1.5 + random.random())
+            node.last_heard_from_primary = self.time
+            self.events.append(f"[t={self.time:.0f}] Node {target_id} enters view {nv.view}")
+            delivered.append((rt, target_id, nv))
         
         # Remove delivered NEW-VIEW messages
-        for nv in delivered:
-            self.new_views.remove(nv)
+        for item in delivered:
+            if item in self.new_views:
+                self.new_views.remove(item)
     
     # -------------------------
     # Main tick
@@ -614,6 +616,7 @@ class PBFTCluster:
         self.deliver_pre_prepares()  # Phase 1
         self.deliver_prepares()       # Phase 2
         self.deliver_commits()        # Phase 3
+        self.deliver_checkpoints()
     
     # -------------------------
     # Utilities
@@ -634,16 +637,23 @@ class PBFTCluster:
     def crash_node(self, node_id: int):
         """Crash a node"""
         if 0 <= node_id < len(self.nodes):
-            self.nodes[node_id].stop()
+            try:
+                self._rpc_stubs[node_id].Crash(pbft_pb2.Empty(), timeout=self._rpc_timeout_s)
+            except Exception:
+                self.nodes[node_id].stop()
             self.events.append(f"[t={self.time:.0f}] Node {node_id} CRASHED")
     
     def restart_node(self, node_id: int):
         """Restart a crashed node"""
         if 0 <= node_id < len(self.nodes):
             node = self.nodes[node_id]
-            
-            # Restart and sync to cluster view
-            node.resume(self.time)
+            try:
+                self._rpc_stubs[node_id].Restart(
+                    pbft_pb2.TimeMsg(current_time=self.time), timeout=self._rpc_timeout_s
+                )
+            except Exception:
+                node.resume(self.time)
+
             node.view = self.current_view
             node.state = PBFTNode.NORMAL
             node.view_change_timer = self.time + node.view_change_timeout * (1.5 + random.random())
@@ -653,9 +663,25 @@ class PBFTCluster:
     def set_byzantine(self, node_id: int, is_byzantine: bool):
         """Mark a node as Byzantine faulty"""
         if 0 <= node_id < len(self.nodes):
-            self.nodes[node_id].set_byzantine(is_byzantine)
-            status = "Byzantine" if is_byzantine else "Correct"
-            self.events.append(f"[t={self.time:.0f}] Node {node_id} marked as {status}")
+            with self._lock:
+                before_exec = self.nodes[node_id].last_executed
+                try:
+                    self._rpc_stubs[node_id].SetByzantine(
+                        pbft_pb2.BoolMsg(value=is_byzantine), timeout=self._rpc_timeout_s
+                    )
+                except Exception:
+                    self.nodes[node_id].set_byzantine(is_byzantine)
+
+                status = "Byzantine" if is_byzantine else "Correct"
+                self.events.append(f"[t={self.time:.0f}] Node {node_id} marked as {status}")
+
+                # If the node was fixed, it may have executed a backlog immediately.
+                if not is_byzantine:
+                    after_exec = self.nodes[node_id].last_executed
+                    if after_exec > before_exec:
+                        self.events.append(
+                            f"[t={self.time:.0f}] Node {node_id} caught up: executed {before_exec + 1}..{after_exec}"
+                        )
     
     def get_events(self, n: int = 50) -> List[str]:
         """Get last n events"""
