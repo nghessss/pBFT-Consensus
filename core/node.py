@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import time
 from threading import Lock
 from typing import Optional, Tuple
@@ -125,6 +126,53 @@ class PBFTNode:
         s = str(s)
         return s if len(s) <= n else f"{s[:n]}..."
 
+    def _byz_make_chaos_pre_prepare(
+        self,
+        *,
+        base_req: pbft_pb2.ClientRequest,
+        view: int,
+        seq: int,
+        primary_id: int,
+        peer_id: int,
+    ) -> pbft_pb2.PrePrepareRequest:
+        """Generate a per-peer chaotic PRE-PREPARE.
+
+        Two chaos modes:
+        - wrong digest for the real request (will be rejected)
+        - mutated payload with matching digest (replica may accept, but peers won't agree)
+        """
+        chaos_mode = random.choice(["wrong_digest", "mutated_payload"])
+
+        if chaos_mode == "wrong_digest":
+            digest = self._maybe_corrupt_digest(self._digest(base_req))
+            return pbft_pb2.PrePrepareRequest(
+                view=int(view),
+                seq=int(seq),
+                digest=str(digest),
+                primary_id=int(primary_id),
+                request=base_req,
+            )
+
+        # mutated_payload
+        mutated_payload = (
+            f"{base_req.payload}|BYZ:{peer_id}:{random.randint(1, 1_000_000)}"
+        )
+        mutated_req = pbft_pb2.ClientRequest(
+            client_id=base_req.client_id,
+            request_id=base_req.request_id,
+            timestamp_ms=base_req.timestamp_ms,
+            payload=mutated_payload,
+            forwarded=base_req.forwarded,
+        )
+        digest = self._digest(mutated_req)
+        return pbft_pb2.PrePrepareRequest(
+            view=int(view),
+            seq=int(seq),
+            digest=str(digest),
+            primary_id=int(primary_id),
+            request=mutated_req,
+        )
+
     def _multicast_prepare(self, view: int, seq: int, digest: str) -> None:
         state = self.state
         # Per current simulation rules: the primary must NOT send PREPARE.
@@ -178,6 +226,7 @@ class PBFTNode:
                 result="",
                 error="node is not alive",
             )
+        print("=" * 37)
 
         if state.node_id != state.primary_id:
             print(
@@ -261,9 +310,8 @@ class PBFTNode:
             )
             state.log[key] = entry
 
-        print("=" * 37)
         print(
-            f"[PBFT {state.node_id}] REQUEST  client={req.client_id} rid={req.request_id} -> view={view} seq={seq}"
+            f"[PBFT {state.node_id}] REQUEST  client={req.client_id} rid={req.request_id} -> view={view} seq={seq} msg={self._short(req.payload, 48)!r}"
         )
 
         # PRE-PREPARE
@@ -277,11 +325,40 @@ class PBFTNode:
         # Per current simulation rules: primary only sends PRE-PREPARE to replicas.
         # No local PRE-PREPARE processing and no PREPARE from primary.
 
+        # Byzantine primary: send chaotic PRE-PREPARE messages per peer (do NOT send the correct one).
+        if state.byzantine:
+            for peer in state.peers:
+                try:
+                    chaos_pre = self._byz_make_chaos_pre_prepare(
+                        base_req=req,
+                        view=view,
+                        seq=seq,
+                        primary_id=int(state.node_id),
+                        peer_id=int(peer),
+                    )
+                    print(
+                        f"[PBFT {state.node_id}] BYZ SEND PRE-PREPARE -> {peer} view={view} seq={seq} digest={str(chaos_pre.digest)[:8]}... msg={self._short(chaos_pre.request.payload, 48)!r}"
+                    )
+                    self.rpc_clients[peer].pre_prepare(chaos_pre, timeout=0.5)
+                except Exception:
+                    pass
+
+            return pbft_pb2.ClientReply(
+                client_id=req.client_id,
+                request_id=req.request_id,
+                replica_id=state.node_id,
+                view=view,
+                seq=seq,
+                committed=False,
+                result="",
+                error="byzantine primary: sent chaotic PRE-PREPARE (no commit expected)",
+            )
+
         # PBFT: primary multicasts PRE-PREPARE to replicas
         for peer in state.peers:
             try:
                 print(
-                    f"[PBFT {state.node_id}] SEND PRE-PREPARE -> {peer} view={view} seq={seq}"
+                    f"[PBFT {state.node_id}] SEND PRE-PREPARE -> {peer} view={view} seq={seq} digest={digest[:8]}... msg={self._short(req.payload, 48)!r}"
                 )
                 self.rpc_clients[peer].pre_prepare(pre, timeout=0.5)
             except Exception:
@@ -337,12 +414,28 @@ class PBFTNode:
         digest = self._digest(req.request)
         if digest != req.digest:
             print(
-                f"[PBFT {state.node_id}] REJECT PRE-PREPARE from {req.primary_id} view={req.view} seq={req.seq}: digest mismatch recv={req.digest} expected={digest}"
+                f"[PBFT {state.node_id}] REJECT PRE-PREPARE from {req.primary_id} view={req.view} seq={req.seq}: digest mismatch recv={req.digest} expected={digest} msg={self._short(req.request.payload, 48)!r}"
             )
+
+            # Strong evidence of a faulty primary in this simplified simulator:
+            # bump view and broadcast so the cluster rotates to a new primary.
+            bumped_to = int(state.view) + 1
+            changed = self._set_view(
+                bumped_to,
+                reason=f"suspect primary {state.primary_id}: PRE-PREPARE digest mismatch",
+            )
+            if changed:
+                self._broadcast_set_view(
+                    bumped_to,
+                    reason=f"suspect primary {state.primary_id}: PRE-PREPARE digest mismatch",
+                )
+
             return pbft_pb2.Ack(ok=False, error="digest mismatch")
 
         key = self._entry_key(req.view, int(req.seq))
         pkey = self._pending_key(req.view, int(req.seq), req.digest)
+
+        created_entry = False
 
         with self._lock:
             if key not in state.log:
@@ -354,6 +447,7 @@ class PBFTNode:
                     request_id=req.request.request_id,
                     payload=req.request.payload,
                 )
+                created_entry = True
             entry = state.log[key]
 
             # Apply any out-of-order PREPARE/COMMIT that arrived before this PRE-PREPARE
@@ -365,13 +459,16 @@ class PBFTNode:
             if pending_commits:
                 entry.commits.update(pending_commits)
 
+        if created_entry:
+            print("=" * 37)
+
         if state.node_id == int(req.primary_id):
             print(
-                f"[PBFT {state.node_id}] LOCAL PRE-PREPARE view={req.view} seq={req.seq} digest={req.digest[:8]}..."
+                f"[PBFT {state.node_id}] LOCAL PRE-PREPARE view={req.view} seq={req.seq} digest={req.digest[:8]}... msg={self._short(req.request.payload, 48)!r}"
             )
         else:
             print(
-                f"[PBFT {state.node_id}] RECV PRE-PREPARE from {req.primary_id} view={req.view} seq={req.seq} digest={req.digest[:8]}..."
+                f"[PBFT {state.node_id}] RECV PRE-PREPARE from {req.primary_id} view={req.view} seq={req.seq} digest={req.digest[:8]}... msg={self._short(req.request.payload, 48)!r}"
             )
 
         if broadcast_prepare:
@@ -403,7 +500,10 @@ class PBFTNode:
             entry = state.log.get(key)
             if entry is None:
                 pkey = self._pending_key(req.view, int(req.seq), req.digest)
+                first_time = pkey not in state.pending_prepares
                 state.pending_prepares.setdefault(pkey, set()).add(int(req.replica_id))
+                # if first_time:
+                #     print("=" * 37)
                 print(
                     f"[PBFT {state.node_id}] BUFFER PREPARE from {req.replica_id} view={req.view} seq={req.seq} (no pre-prepare yet)"
                 )
@@ -412,9 +512,24 @@ class PBFTNode:
                 # Late/duplicate message after execution; ignore.
                 return pbft_pb2.Ack(ok=True, error="ignored (already executed)")
             if entry.digest != req.digest:
+                # Conflicting digests for the same (view,seq) are what you see when a byzantine
+                # primary sends different PRE-PREPAREs. Accumulate evidence and then trigger a
+                # simplified view change.
+                conflict_set = state.conflicting_prepares.setdefault(key, set())
+                conflict_set.add(int(req.replica_id))
+                conflicts = len(conflict_set)
                 print(
-                    f"[PBFT {state.node_id}] REJECT PREPARE from {req.replica_id} view={req.view} seq={req.seq}: digest mismatch recv={req.digest} expected={entry.digest}"
+                    f"[PBFT {state.node_id}] REJECT PREPARE from {req.replica_id} view={req.view} seq={req.seq}: digest mismatch recv={req.digest} expected={entry.digest} conflicts={conflicts}/{state.f + 1}"
                 )
+
+                # Threshold: f+1 distinct conflicting senders (at least one honest) -> suspect primary.
+                if conflicts >= (state.f + 1):
+                    bumped_to = int(state.view) + 1
+                    reason = f"suspect primary {state.primary_id}: conflicting PREPARE digests for view={req.view} seq={req.seq}"
+                    changed = self._set_view(bumped_to, reason=reason)
+                    if changed:
+                        self._broadcast_set_view(bumped_to, reason=reason)
+
                 return pbft_pb2.Ack(ok=False, error="digest mismatch")
 
             entry.prepares.add(int(req.replica_id))
@@ -480,7 +595,10 @@ class PBFTNode:
             entry = state.log.get(key)
             if entry is None:
                 pkey = self._pending_key(req.view, int(req.seq), req.digest)
+                first_time = pkey not in state.pending_commits
                 state.pending_commits.setdefault(pkey, set()).add(int(req.replica_id))
+                # if first_time:
+                #     print("=" * 37)
                 print(
                     f"[PBFT {state.node_id}] BUFFER COMMIT from {req.replica_id} view={req.view} seq={req.seq} (no pre-prepare yet)"
                 )

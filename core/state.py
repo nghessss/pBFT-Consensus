@@ -50,6 +50,11 @@ class PBFTState:
         self.pending_prepares: Dict[Tuple[int, int, str], Set[int]] = {}
         self.pending_commits: Dict[Tuple[int, int, str], Set[int]] = {}
 
+        # Evidence of inconsistent PREPAREs for an already-known (view, seq).
+        # Used to trigger a simplified view change when the primary appears faulty.
+        # Keyed by (view, seq) -> set(replica_id) that sent a conflicting digest.
+        self.conflicting_prepares: Dict[Tuple[int, int], Set[int]] = {}
+
     @property
     def replica_ids(self) -> List[int]:
         return sorted([self.node_id] + list(self.peers))
