@@ -1,13 +1,13 @@
-# Raft Consensus Simulator
+# PBFT Consensus Simulator
 
 ## 1. Giới thiệu
 
-**Raft Consensus Simulator** là một ứng dụng mô phỏng thuật toán đồng thuận **RAFT** trong môi trường mạng ngang hàng (peer-to-peer).  
-Hệ thống được thiết kế theo kiến trúc **tách biệt rõ ràng giữa tầng xử lý consensus và tầng giao diện**, giúp phản ánh đúng cách một hệ thống phân tán thực tế hoạt động.
+**PBFT Consensus Simulator** là một ứng dụng mô phỏng thuật toán đồng thuận **PBFT (Practical Byzantine Fault Tolerance)** trong môi trường mạng ngang hàng (peer-to-peer).
+Hệ thống được thiết kế theo kiến trúc **tách biệt giữa tầng consensus và tầng giao diện**, giống cách các hệ thống phân tán thực tế thường triển khai.
 
-- Các **RAFT node** chạy độc lập dưới dạng **process riêng**
-- Các node **giao tiếp trực tiếp với nhau qua RPC**
-- **Streamlit** chỉ đóng vai trò **UI quan sát và điều khiển**, không tham gia vào quá trình đồng thuận
+- Các **PBFT replica** chạy độc lập dưới dạng **process riêng**
+- Các replica **giao tiếp trực tiếp với nhau qua gRPC**
+- **Streamlit** chỉ đóng vai trò **UI quan sát và gửi request**, không tham gia vào protocol
 
 ---
 
@@ -19,20 +19,13 @@ Hệ thống được thiết kế theo kiến trúc **tách biệt rõ ràng gi
 |    Streamlit UI    |
 |     (Observer)     |
 +----------+---------+
-|
-| Status 
-v
+		   |
+		   | Status / SubmitRequest
+		   v
 +--------------------+
-|    Raft Node 1     | <---- RPC ----> Raft Node 2
-|  (Leader/Follower) | <---- RPC ----> Raft Node 3
-+--------------------+ <---- RPC ----> Raft Node 4
-^
-| 
-RPC
-| 
-+--------------------+
-|    Raft Node N     |
-+--------------------+
+|   PBFT Replica 1   | <---- gRPC ----> PBFT Replica 2
+|  (Primary/Replica) | <---- gRPC ----> PBFT Replica 3
++--------------------+ <---- gRPC ----> PBFT Replica 4
 
 ```
 
@@ -40,12 +33,12 @@ RPC
 
 | Thành phần | Vai trò |
 |----------|--------|
-| Raft Node | Thực hiện bầu leader, replicate log, commit |
-| RPC Node ↔ Node | RequestVote, AppendEntries, Heartbeat |
-| Streamlit | Hiển thị trạng thái & mô phỏng lỗi |
-| RPC UI ↔ Node | Lấy trạng thái, kill node, partition |
+| PBFT Replica | Xử lý 3 pha: PRE-PREPARE → PREPARE → COMMIT, thực thi request khi đạt quorum |
+| RPC Replica ↔ Replica | PrePrepare, Prepare, Commit |
+| Streamlit | Hiển thị trạng thái cluster và gửi client request |
+| RPC UI ↔ Replica | GetStatus, SubmitRequest (và các RPC tiện ích như Ping/KillNode) |
 
-**Streamlit không phải là một node RAFT**.
+**Streamlit không phải là một PBFT replica**.
 
 ---
 
@@ -55,26 +48,28 @@ RPC
 - **Streamlit** cho giao diện mô phỏng
 - **Multiprocessing / Subprocess** để chạy nhiều node trên **1 máy**
 
+Ghi chú: Cluster manager hiện dùng `cmd.exe`/`taskkill` nên phù hợp nhất với **Windows**.
+
 ---
 
 ## 4. Cấu trúc thư mục
 
 ```
 
-raft/
+project/
 │
 ├── core/
-│   ├── node.py            # Raft Node implementation
-│   ├── raft.py            # Core Raft logic (leader election, log replication)
-│   ├── state.py           # Node state & persistent data
-│   ├── cluster.py         # Cluster manager (spawn nodes)
+│   ├── node.py            # PBFT replica implementation
+│   ├── state.py           # PBFT state & in-memory log
+│   ├── cluster.py         # Cluster manager (spawn replicas)
+│   ├── raft.py            # (cũ) logic Raft, hiện không dùng
 │   └── ...         
 |
 ├── rpc/
-│   ├── raft.proto
-│   ├── raft_pb2.py
-│   ├── raft_pb2_grpc.py
-│   ├── server.py          # RPC server for each node
+│   ├── pbft.proto
+│   ├── pbft_pb2.py
+│   ├── pbft_pb2_grpc.py
+│   ├── server.py          # RPC server for each replica
 │   └── client.py          # RPC client utilities
 │
 ├── ui/
@@ -83,7 +78,8 @@ raft/
 │   └── utils/          
 │
 ├── streamlit_app.py       # Streamlit entry point
-├── run_node.py            # Init a Raft Node
+├── run_node.py            # Init a PBFT replica
+├── send_request.py        # Send a client request via gRPC
 ├── requirements.txt
 └── README.md
 
@@ -110,20 +106,31 @@ pip install -r requirements.txt
 
 ## 6. Chạy hệ thống
 
-### 6.1 Khởi động các Raft node
+### 6.1 Khởi động các PBFT replica (manual)
 
-Mỗi node chạy như **một process riêng**:
+Mỗi replica chạy như **một process riêng**:
 
 ```bash
 python run_node.py --id 1 --port 5001
 python run_node.py --id 2 --port 5002
 python run_node.py --id 3 --port 5003
 ...
+
+Nếu muốn các node nhìn thấy nhau, truyền `--peers` theo format `id@host:port` (comma-separated). Ví dụ cho 4 node:
+
+```bash
+python run_node.py --id 1 --port 5001 --peers "1@localhost:5001,2@localhost:5002,3@localhost:5003,4@localhost:5004"
+python run_node.py --id 2 --port 5002 --peers "1@localhost:5001,2@localhost:5002,3@localhost:5003,4@localhost:5004"
+python run_node.py --id 3 --port 5003 --peers "1@localhost:5001,2@localhost:5002,3@localhost:5003,4@localhost:5004"
+python run_node.py --id 4 --port 5004 --peers "1@localhost:5001,2@localhost:5002,3@localhost:5003,4@localhost:5004"
+```
+
+PBFT classic yêu cầu số node `n = 3f + 1` (ví dụ: 4, 7, 10).
 ```
 
 ---
 
-### 6.2 Chạy Streamlit UI
+### 6.2 Chạy Streamlit UI (khuyến nghị)
 
 ```bash
 streamlit run streamlit_app.py
@@ -135,46 +142,56 @@ Mở trình duyệt tại:
 http://localhost:<PORT>
 ```
 
+Trong UI:
+
+- Chọn số node hợp lệ (4, 7, 10)
+- Start/Stop cluster
+- Gửi client request (UI sẽ gửi vào 1 node bất kỳ; nếu node đó không phải Primary thì nó sẽ forward sang Primary)
+
 ---
 
-## 7. Các chức năng cài đặt
+## 7. Những gì đang được mô phỏng (theo code hiện tại)
 
-### 7.1 Leader Election
+### 7.1 PBFT 3-phase
 
-* RequestVote RPC
-* Timeout ngẫu nhiên
-* Xử lý xung đột bầu leader
+- Client gửi `SubmitRequest` vào 1 replica
+- Nếu replica không phải **Primary**, request được forward sang Primary (tránh loop)
+- Primary multicast `PrePrepare`
+- Replica multicast `Prepare`
+- Khi đạt `2f + 1` prepare → multicast `Commit`
+- Khi đạt `2f + 1` commit và đã `Prepared` → **Execute** (demo: echo payload)
 
-### 7.2 Log Replication
+### 7.2 Quan sát trạng thái
 
-* AppendEntries
-* Đồng bộ log giữa leader và follower
-* Commit khi đạt đa số
-
-### 7.3 Mô phỏng lỗi
-
-| Tình huống        | Mô tả                                     |
-| ----------------- | ----------------------------------------- |
-| Leader crash      | Kill leader → cluster tự bầu leader mới   |
-| Node crash        | Node offline → khi online lại sẽ sync log |
-| Network partition | Chia cluster thành 2 nhóm                 |
-| Heal network      | Kết nối lại, đảm bảo consistency          |
-
-### 7.4 Visualization
-
-* Màu sắc thể hiện vai trò node
-* Hiển thị term, commit index
-* Realtime update qua polling RPC
+- UI polling `GetStatus` để hiển thị `role`, `view`, `primary_id`, `f`
 
 ---
 
 ## 8. Streamlit có vai trò gì?
 
 * ❌ Không tham gia consensus
-* ❌ Không trung gian message giữa các node
+* ❌ Không trung gian message giữa các replica
 * ✅ Quan sát trạng thái cluster
-* ✅ Gửi lệnh điều khiển (kill, partition, heal)
+* ✅ Gửi client request để demo luồng PBFT
 
-> Nếu Streamlit dừng, cluster RAFT vẫn tiếp tục hoạt động bình thường.
+> Nếu Streamlit dừng, cluster PBFT vẫn tiếp tục hoạt động bình thường.
+
+---
+
+## 9. (Tuỳ chọn) Gửi request bằng CLI
+
+```bash
+python send_request.py --addr localhost:5001 --payload "hello"
+```
+
+---
+
+## 10. Regenerate gRPC stubs (khi sửa proto)
+
+Nếu bạn chỉnh [rpc/pbft.proto](rpc/pbft.proto), chạy lại:
+
+```bash
+python -m grpc_tools.protoc -I. --python_out=rpc --grpc_python_out=rpc rpc/pbft.proto
+```
 
 ---

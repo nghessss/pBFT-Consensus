@@ -1,10 +1,9 @@
 import grpc
 import time
 from concurrent import futures
-from rpc import raft_pb2, raft_pb2_grpc
+from rpc import pbft_pb2, pbft_pb2_grpc
 
-
-class PBFTServer(raft_pb2_grpc.PBFTServiceServicer):
+class PBFTServer(pbft_pb2_grpc.PBFTServiceServicer):
     def __init__(self, node):
         self.node = node
 
@@ -22,7 +21,7 @@ class PBFTServer(raft_pb2_grpc.PBFTServiceServicer):
 
     def GetStatus(self, request, context):
         state = self.node.state
-        return raft_pb2.StatusReply(
+        return pbft_pb2.StatusReply(
             node_id=state.node_id,
             role=state.role,
             view=state.view,
@@ -33,18 +32,18 @@ class PBFTServer(raft_pb2_grpc.PBFTServiceServicer):
 
     def KillNode(self, req, ctx):
         self.node.state.alive = False
-        return raft_pb2.Empty()
+        return pbft_pb2.Empty()
     
     def Ping(self, request, context):
         print(f"[RPC] Node {self.node.state.node_id} received Ping!")
-        return raft_pb2.PingReply(
+        return pbft_pb2.PingReply(
             message=f"Node {self.node.state.node_id} alive"
         )
 
 
 def serve(node, port):
     server = grpc.server(futures.ThreadPoolExecutor(10))
-    raft_pb2_grpc.add_PBFTServiceServicer_to_server(
+    pbft_pb2_grpc.add_PBFTServiceServicer_to_server(
         PBFTServer(node), server
     )
     server.add_insecure_port(f"[::]:{port}")

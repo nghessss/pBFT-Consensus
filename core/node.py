@@ -6,7 +6,7 @@ from threading import Lock
 from typing import Optional, Tuple
 
 from core.state import PBFTEntry, PBFTState
-from rpc import raft_pb2
+from rpc import pbft_pb2
 
 
 class PBFTNode:
@@ -25,7 +25,7 @@ class PBFTNode:
     # ============================
     # PBFT helpers
     # ============================
-    def _digest(self, request: raft_pb2.ClientRequest) -> str:
+    def _digest(self, request: pbft_pb2.ClientRequest) -> str:
         h = hashlib.sha256()
         h.update(request.client_id.encode("utf-8"))
         h.update(b"|")
@@ -43,11 +43,11 @@ class PBFTNode:
     # ============================
     # RPC handlers (called by rpc/server.py)
     # ============================
-    def on_client_request(self, req: raft_pb2.ClientRequest, timeout_s: float = 30.0) -> raft_pb2.ClientReply:
+    def on_client_request(self, req: pbft_pb2.ClientRequest, timeout_s: float = 30.0) -> pbft_pb2.ClientReply:
         state = self.state
 
         if not state.alive:
-            return raft_pb2.ClientReply(
+            return pbft_pb2.ClientReply(
                 client_id=req.client_id,
                 request_id=req.request_id,
                 replica_id=state.node_id,
@@ -64,7 +64,7 @@ class PBFTNode:
             )
             # Minimal forwarding for convenience (avoid forwarding loops)
             if req.forwarded:
-                return raft_pb2.ClientReply(
+                return pbft_pb2.ClientReply(
                     client_id=req.client_id,
                     request_id=req.request_id,
                     replica_id=state.node_id,
@@ -76,7 +76,7 @@ class PBFTNode:
                 )
 
             if state.primary_id in self.rpc_clients:
-                fwd = raft_pb2.ClientRequest(
+                fwd = pbft_pb2.ClientRequest(
                     client_id=req.client_id,
                     request_id=req.request_id,
                     timestamp_ms=req.timestamp_ms,
@@ -87,7 +87,7 @@ class PBFTNode:
                     print(f"[PBFT {state.node_id}] SEND REQUEST -> primary {state.primary_id}")
                     return self.rpc_clients[state.primary_id].client_request(fwd, timeout=timeout_s)
                 except Exception as e:
-                    return raft_pb2.ClientReply(
+                    return pbft_pb2.ClientReply(
                         client_id=req.client_id,
                         request_id=req.request_id,
                         replica_id=state.node_id,
@@ -98,7 +98,7 @@ class PBFTNode:
                         error=f"forward to primary failed: {e}",
                     )
 
-            return raft_pb2.ClientReply(
+            return pbft_pb2.ClientReply(
                 client_id=req.client_id,
                 request_id=req.request_id,
                 replica_id=state.node_id,
@@ -130,7 +130,7 @@ class PBFTNode:
         print(f"[PBFT {state.node_id}] REQUEST  client={req.client_id} rid={req.request_id} -> view={view} seq={seq}")
 
         # PRE-PREPARE
-        pre = raft_pb2.PrePrepareRequest(
+        pre = pbft_pb2.PrePrepareRequest(
             view=view,
             seq=seq,
             digest=digest,
@@ -159,7 +159,7 @@ class PBFTNode:
             entry = state.log.get(self._entry_key(view, seq))
 
         if entry is None:
-            return raft_pb2.ClientReply(
+            return pbft_pb2.ClientReply(
                 client_id=req.client_id,
                 request_id=req.request_id,
                 replica_id=state.node_id,
@@ -170,7 +170,7 @@ class PBFTNode:
                 error="request entry missing",
             )
 
-        return raft_pb2.ClientReply(
+        return pbft_pb2.ClientReply(
             client_id=entry.client_id,
             request_id=entry.request_id,
             replica_id=state.node_id,
@@ -181,18 +181,18 @@ class PBFTNode:
             error=entry.error or "",
         )
 
-    def on_pre_prepare(self, req: raft_pb2.PrePrepareRequest) -> raft_pb2.Ack:
+    def on_pre_prepare(self, req: pbft_pb2.PrePrepareRequest) -> pbft_pb2.Ack:
         state = self.state
         if not state.alive:
-            return raft_pb2.Ack(ok=False, error="node is not alive")
+            return pbft_pb2.Ack(ok=False, error="node is not alive")
         if req.view != state.view:
-            return raft_pb2.Ack(ok=False, error="wrong view")
+            return pbft_pb2.Ack(ok=False, error="wrong view")
         if req.primary_id != state.primary_id:
-            return raft_pb2.Ack(ok=False, error="wrong primary")
+            return pbft_pb2.Ack(ok=False, error="wrong primary")
 
         digest = self._digest(req.request)
         if digest != req.digest:
-            return raft_pb2.Ack(ok=False, error="digest mismatch")
+            return pbft_pb2.Ack(ok=False, error="digest mismatch")
 
         key = self._entry_key(req.view, int(req.seq))
         pkey = self._pending_key(req.view, int(req.seq), req.digest)
@@ -228,7 +228,7 @@ class PBFTNode:
             )
 
         # PREPARE (broadcast)
-        prepare = raft_pb2.PrepareRequest(
+        prepare = pbft_pb2.PrepareRequest(
             view=req.view,
             seq=req.seq,
             digest=req.digest,
@@ -244,14 +244,14 @@ class PBFTNode:
 
             self.on_prepare(prepare)
 
-        return raft_pb2.Ack(ok=True, error="")
+        return pbft_pb2.Ack(ok=True, error="")
 
-    def on_prepare(self, req: raft_pb2.PrepareRequest) -> raft_pb2.Ack:
+    def on_prepare(self, req: pbft_pb2.PrepareRequest) -> pbft_pb2.Ack:
         state = self.state
         if not state.alive:
-            return raft_pb2.Ack(ok=False, error="node is not alive")
+            return pbft_pb2.Ack(ok=False, error="node is not alive")
         if req.view != state.view:
-            return raft_pb2.Ack(ok=False, error="wrong view")
+            return pbft_pb2.Ack(ok=False, error="wrong view")
 
         key = self._entry_key(req.view, int(req.seq))
 
@@ -266,12 +266,12 @@ class PBFTNode:
                 pkey = self._pending_key(req.view, int(req.seq), req.digest)
                 state.pending_prepares.setdefault(pkey, set()).add(int(req.replica_id))
                 print(f"[PBFT {state.node_id}] BUFFER PREPARE from {req.replica_id} view={req.view} seq={req.seq} (no pre-prepare yet)")
-                return raft_pb2.Ack(ok=True, error="buffered")
+                return pbft_pb2.Ack(ok=True, error="buffered")
             if entry.executed:
                 # Late/duplicate message after execution; ignore.
-                return raft_pb2.Ack(ok=True, error="ignored (already executed)")
+                return pbft_pb2.Ack(ok=True, error="ignored (already executed)")
             if entry.digest != req.digest:
-                return raft_pb2.Ack(ok=False, error="digest mismatch")
+                return pbft_pb2.Ack(ok=False, error="digest mismatch")
 
             entry.prepares.add(int(req.replica_id))
             prepares_count = len(entry.prepares)
@@ -285,7 +285,7 @@ class PBFTNode:
                 f"[PBFT {state.node_id}] PREPARED view={req.view} seq={req.seq} prepares={prepares_count}/{state.quorum_prepare}"
             )
 
-            commit = raft_pb2.CommitRequest(
+            commit = pbft_pb2.CommitRequest(
                 view=req.view,
                 seq=req.seq,
                 digest=req.digest,
@@ -302,14 +302,14 @@ class PBFTNode:
             # Count our own COMMIT vote locally
             self.on_commit(commit)
 
-        return raft_pb2.Ack(ok=True, error="")
+        return pbft_pb2.Ack(ok=True, error="")
 
-    def on_commit(self, req: raft_pb2.CommitRequest) -> raft_pb2.Ack:
+    def on_commit(self, req: pbft_pb2.CommitRequest) -> pbft_pb2.Ack:
         state = self.state
         if not state.alive:
-            return raft_pb2.Ack(ok=False, error="node is not alive")
+            return pbft_pb2.Ack(ok=False, error="node is not alive")
         if req.view != state.view:
-            return raft_pb2.Ack(ok=False, error="wrong view")
+            return pbft_pb2.Ack(ok=False, error="wrong view")
 
         key = self._entry_key(req.view, int(req.seq))
 
@@ -324,11 +324,11 @@ class PBFTNode:
                 pkey = self._pending_key(req.view, int(req.seq), req.digest)
                 state.pending_commits.setdefault(pkey, set()).add(int(req.replica_id))
                 print(f"[PBFT {state.node_id}] BUFFER COMMIT from {req.replica_id} view={req.view} seq={req.seq} (no pre-prepare yet)")
-                return raft_pb2.Ack(ok=True, error="buffered")
+                return pbft_pb2.Ack(ok=True, error="buffered")
             if entry.executed:
-                return raft_pb2.Ack(ok=True, error="ignored (already executed)")
+                return pbft_pb2.Ack(ok=True, error="ignored (already executed)")
             if entry.digest != req.digest:
-                return raft_pb2.Ack(ok=False, error="digest mismatch")
+                return pbft_pb2.Ack(ok=False, error="digest mismatch")
 
             entry.commits.add(int(req.replica_id))
             commits_count = len(entry.commits)
@@ -344,7 +344,7 @@ class PBFTNode:
             )
             self._execute(entry)
 
-        return raft_pb2.Ack(ok=True, error="")
+        return pbft_pb2.Ack(ok=True, error="")
 
     def _execute(self, entry: PBFTEntry) -> None:
         state = self.state

@@ -2,7 +2,7 @@ import streamlit as st
 import time
 
 from rpc.client import PBFTClient
-from rpc import raft_pb2
+from rpc import pbft_pb2
 
 def render_sidebar(cluster):
     st.sidebar.header("⚙️ Cluster Controls (PBFT)")
@@ -86,7 +86,7 @@ def render_sidebar(cluster):
 
             client = PBFTClient(f"localhost:{target_node['port']}")
             now = int(time.time() * 1000)
-            req = raft_pb2.ClientRequest(
+            req = pbft_pb2.ClientRequest(
                 client_id="streamlit",
                 request_id=str(now),
                 timestamp_ms=now,

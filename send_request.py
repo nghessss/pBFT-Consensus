@@ -2,7 +2,7 @@ import argparse
 import time
 
 from rpc.client import PBFTClient
-from rpc import raft_pb2
+from rpc import pbft_pb2
 
 
 def main():
@@ -16,7 +16,7 @@ def main():
     client = PBFTClient(args.addr)
     now = int(time.time() * 1000)
 
-    req = raft_pb2.ClientRequest(
+    req = pbft_pb2.ClientRequest(
         client_id=args.client_id,
         request_id=str(now),
         timestamp_ms=now,

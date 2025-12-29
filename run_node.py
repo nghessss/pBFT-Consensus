@@ -37,7 +37,7 @@ def main():
     clients = {pid: PBFTClient(addr) for pid, addr in peers.items()}
     
     # ============================
-    # INIT RAFT NODE
+    # INIT PBFT NODE
     # ============================
     node = PBFTNode(
         node_id=args.id,
