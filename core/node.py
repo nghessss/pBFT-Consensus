@@ -261,6 +261,7 @@ class PBFTNode:
             )
             state.log[key] = entry
 
+        print("=" * 37)
         print(
             f"[PBFT {state.node_id}] REQUEST  client={req.client_id} rid={req.request_id} -> view={view} seq={seq}"
         )
@@ -521,12 +522,9 @@ class PBFTNode:
             entry.result = entry.payload
             entry.executed = True
             entry.error = ""
-
         print(
             f"[PBFT {state.node_id}] REPLY    view={entry.view} seq={entry.seq} client={entry.client_id} rid={entry.request_id} result={entry.result!r}"
         )
-
-        print("=" * 37)
 
         with entry.done:
             entry.done.notify_all()
