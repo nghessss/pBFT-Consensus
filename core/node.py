@@ -113,19 +113,32 @@ class PBFTNode:
             return digest
         return f"{digest}:byz"
 
+    def _short(self, s: str, n: int = 12) -> str:
+        s = str(s)
+        return s if len(s) <= n else f"{s[:n]}..."
+
     def _multicast_prepare(self, view: int, seq: int, digest: str) -> None:
         state = self.state
+        out_digest = self._maybe_corrupt_digest(str(digest))
+        if state.byzantine and out_digest != str(digest):
+            print(
+                f"[PBFT {state.node_id}] BYZ SEND PREPARE view={view} seq={seq} digest={out_digest} (was {digest})"
+            )
         prepare = pbft_pb2.PrepareRequest(
             view=int(view),
             seq=int(seq),
-            digest=self._maybe_corrupt_digest(str(digest)),
+            digest=out_digest,
             replica_id=int(state.node_id),
         )
 
         for peer in state.peers:
             try:
                 print(f"[PBFT {state.node_id}] SEND PREPARE -> {peer} view={view} seq={seq}")
-                self.rpc_clients[peer].prepare(prepare, timeout=0.5)
+                ack = self.rpc_clients[peer].prepare(prepare, timeout=0.5)
+                if hasattr(ack, "ok") and (not ack.ok):
+                    print(
+                        f"[PBFT {state.node_id}] PREPARE rejected by {peer}: {getattr(ack, 'error', '')} digest={prepare.digest}"
+                    )
             except Exception:
                 pass
 
@@ -313,6 +326,9 @@ class PBFTNode:
 
         digest = self._digest(req.request)
         if digest != req.digest:
+            print(
+                f"[PBFT {state.node_id}] REJECT PRE-PREPARE from {req.primary_id} view={req.view} seq={req.seq}: digest mismatch recv={req.digest} expected={digest}"
+            )
             return pbft_pb2.Ack(ok=False, error="digest mismatch")
 
         key = self._entry_key(req.view, int(req.seq))
@@ -380,6 +396,9 @@ class PBFTNode:
                 # Late/duplicate message after execution; ignore.
                 return pbft_pb2.Ack(ok=True, error="ignored (already executed)")
             if entry.digest != req.digest:
+                print(
+                    f"[PBFT {state.node_id}] REJECT PREPARE from {req.replica_id} view={req.view} seq={req.seq}: digest mismatch recv={req.digest} expected={entry.digest}"
+                )
                 return pbft_pb2.Ack(ok=False, error="digest mismatch")
 
             entry.prepares.add(int(req.replica_id))
@@ -400,11 +419,19 @@ class PBFTNode:
                 digest=self._maybe_corrupt_digest(req.digest),
                 replica_id=state.node_id,
             )
+            if state.byzantine and str(commit.digest) != str(req.digest):
+                print(
+                    f"[PBFT {state.node_id}] BYZ SEND COMMIT view={req.view} seq={req.seq} digest={commit.digest} (was {req.digest})"
+                )
             # PBFT: once PREPARED, multicast COMMIT (do not wait to be committed).
             for peer in state.peers:
                 try:
                     print(f"[PBFT {state.node_id}] SEND COMMIT -> {peer} view={req.view} seq={req.seq}")
-                    self.rpc_clients[peer].commit(commit, timeout=0.5)
+                    ack = self.rpc_clients[peer].commit(commit, timeout=0.5)
+                    if hasattr(ack, "ok") and (not ack.ok):
+                        print(
+                            f"[PBFT {state.node_id}] COMMIT rejected by {peer}: {getattr(ack, 'error', '')} digest={commit.digest}"
+                        )
                 except Exception:
                     pass
 
@@ -439,6 +466,9 @@ class PBFTNode:
             if entry.executed:
                 return pbft_pb2.Ack(ok=True, error="ignored (already executed)")
             if entry.digest != req.digest:
+                print(
+                    f"[PBFT {state.node_id}] REJECT COMMIT from {req.replica_id} view={req.view} seq={req.seq}: digest mismatch recv={req.digest} expected={entry.digest}"
+                )
                 return pbft_pb2.Ack(ok=False, error="digest mismatch")
 
             entry.commits.add(int(req.replica_id))
