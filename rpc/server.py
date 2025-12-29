@@ -19,6 +19,9 @@ class PBFTServer(pbft_pb2_grpc.PBFTServiceServicer):
     def Commit(self, req, ctx):
         return self.node.on_commit(req)
 
+    def SetView(self, req, ctx):
+        return self.node.on_set_view(req)
+
     def GetStatus(self, request, context):
         state = self.node.state
         return pbft_pb2.StatusReply(

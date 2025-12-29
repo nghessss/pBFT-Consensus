@@ -17,10 +17,76 @@ class PBFTNode:
 
     def start(self):
         state = self.state
+        # If this process was restarted while the cluster already moved to a higher view,
+        # sync up so we don't reject messages forever.
+        self._sync_view_from_peers(best_effort=True)
         print(f"[PBFT Node {state.node_id}] starting")
         print(
             f"[PBFT Node {state.node_id}] role={state.role} view={state.view} primary={state.primary_id} f={state.f} n={state.n}"
         )
+
+    # ============================
+    # View / failover helpers
+    # ============================
+    def _sync_view_from_peers(self, best_effort: bool = True) -> None:
+        state = self.state
+        max_view = state.view
+        for pid, client in list(self.rpc_clients.items()):
+            try:
+                status = client.get_status()
+                if int(status.view) > max_view:
+                    max_view = int(status.view)
+            except Exception:
+                continue
+
+        if max_view > state.view:
+            with self._lock:
+                state.view = max_view
+
+    def _set_view(self, new_view: int, reason: str = "") -> bool:
+        state = self.state
+        new_view = int(new_view)
+        if new_view <= state.view:
+            return False
+        with self._lock:
+            if new_view <= state.view:
+                return False
+            state.view = new_view
+        print(f"[PBFT {state.node_id}] VIEW -> {state.view} primary={state.primary_id} reason={reason}")
+        return True
+
+    def _broadcast_set_view(self, new_view: int, reason: str) -> None:
+        state = self.state
+        req = pbft_pb2.SetViewRequest(view=int(new_view), sender_id=int(state.node_id), reason=str(reason))
+        for pid, client in list(self.rpc_clients.items()):
+            try:
+                client.set_view(req, timeout=0.5)
+            except Exception:
+                pass
+
+    def _ensure_live_primary(self, max_hops: Optional[int] = None) -> bool:
+        state = self.state
+        hops = int(max_hops if max_hops is not None else state.n)
+        for _ in range(max(1, hops)):
+            primary_id = int(state.primary_id)
+            if primary_id == int(state.node_id):
+                return True
+
+            client = self.rpc_clients.get(primary_id)
+            if client is not None:
+                try:
+                    client.ping(timeout=0.4)
+                    return True
+                except Exception:
+                    pass
+
+            # primary unreachable -> bump view
+            bumped_to = int(state.view) + 1
+            changed = self._set_view(bumped_to, reason=f"failover: primary {primary_id} unreachable")
+            if changed:
+                self._broadcast_set_view(bumped_to, reason=f"failover: primary {primary_id} unreachable")
+
+        return int(state.primary_id) == int(state.node_id)
 
     # ============================
     # PBFT helpers
@@ -82,28 +148,37 @@ class PBFTNode:
                     error=f"not primary (primary_id={state.primary_id})",
                 )
 
-            if state.primary_id in self.rpc_clients:
-                fwd = pbft_pb2.ClientRequest(
-                    client_id=req.client_id,
-                    request_id=req.request_id,
-                    timestamp_ms=req.timestamp_ms,
-                    payload=req.payload,
-                    forwarded=True,
-                )
-                try:
-                    print(f"[PBFT {state.node_id}] SEND REQUEST -> primary {state.primary_id}")
-                    return self.rpc_clients[state.primary_id].client_request(fwd, timeout=timeout_s)
-                except Exception as e:
-                    return pbft_pb2.ClientReply(
+            # If current primary is down, try a simplified failover (bump view -> new primary).
+            self._ensure_live_primary()
+
+            # If we became the new primary after a view bump, handle the request locally.
+            if state.node_id == state.primary_id:
+                return self.on_client_request(req, timeout_s=timeout_s)
+
+            # Re-check role after possible view change
+            if state.node_id != state.primary_id:
+                if state.primary_id in self.rpc_clients:
+                    fwd = pbft_pb2.ClientRequest(
                         client_id=req.client_id,
                         request_id=req.request_id,
-                        replica_id=state.node_id,
-                        view=state.view,
-                        seq=0,
-                        committed=False,
-                        result="",
-                        error=f"forward to primary failed: {e}",
+                        timestamp_ms=req.timestamp_ms,
+                        payload=req.payload,
+                        forwarded=True,
                     )
+                    try:
+                        print(f"[PBFT {state.node_id}] SEND REQUEST -> primary {state.primary_id}")
+                        return self.rpc_clients[state.primary_id].client_request(fwd, timeout=timeout_s)
+                    except Exception as e:
+                        return pbft_pb2.ClientReply(
+                            client_id=req.client_id,
+                            request_id=req.request_id,
+                            replica_id=state.node_id,
+                            view=state.view,
+                            seq=0,
+                            committed=False,
+                            result="",
+                            error=f"forward to primary failed: {e}",
+                        )
 
             return pbft_pb2.ClientReply(
                 client_id=req.client_id,
@@ -192,6 +267,8 @@ class PBFTNode:
         state = self.state
         if not state.alive:
             return pbft_pb2.Ack(ok=False, error="node is not alive")
+        if int(req.view) > int(state.view):
+            self._set_view(int(req.view), reason="observed higher view in PRE-PREPARE")
         if req.view != state.view:
             return pbft_pb2.Ack(ok=False, error="wrong view")
         if req.primary_id != state.primary_id:
@@ -241,15 +318,16 @@ class PBFTNode:
             digest=self._maybe_corrupt_digest(req.digest),
             replica_id=state.node_id,
         )
-        if state.node_id != state.primary_id:
-            for peer in state.peers:
-                try:
-                    print(f"[PBFT {state.node_id}] SEND PREPARE -> {peer} view={req.view} seq={req.seq}")
-                    self.rpc_clients[peer].prepare(prepare)
-                except Exception:
-                    pass
+        # PBFT: every replica (including the primary) multicasts PREPARE.
+        for peer in state.peers:
+            try:
+                print(f"[PBFT {state.node_id}] SEND PREPARE -> {peer} view={req.view} seq={req.seq}")
+                self.rpc_clients[peer].prepare(prepare)
+            except Exception:
+                pass
 
-            self.on_prepare(prepare)
+        # Count our own PREPARE vote locally
+        self.on_prepare(prepare)
 
         return pbft_pb2.Ack(ok=True, error="")
 
@@ -257,6 +335,8 @@ class PBFTNode:
         state = self.state
         if not state.alive:
             return pbft_pb2.Ack(ok=False, error="node is not alive")
+        if int(req.view) > int(state.view):
+            self._set_view(int(req.view), reason="observed higher view in PREPARE")
         if req.view != state.view:
             return pbft_pb2.Ack(ok=False, error="wrong view")
 
@@ -315,6 +395,8 @@ class PBFTNode:
         state = self.state
         if not state.alive:
             return pbft_pb2.Ack(ok=False, error="node is not alive")
+        if int(req.view) > int(state.view):
+            self._set_view(int(req.view), reason="observed higher view in COMMIT")
         if req.view != state.view:
             return pbft_pb2.Ack(ok=False, error="wrong view")
 
@@ -369,3 +451,14 @@ class PBFTNode:
 
         with entry.done:
             entry.done.notify_all()
+
+    # ============================
+    # RPC handler: SetView
+    # ============================
+    def on_set_view(self, req: pbft_pb2.SetViewRequest) -> pbft_pb2.Ack:
+        state = self.state
+        if not state.alive:
+            return pbft_pb2.Ack(ok=False, error="node is not alive")
+
+        changed = self._set_view(int(req.view), reason=f"set by {req.sender_id}: {req.reason}")
+        return pbft_pb2.Ack(ok=True, error="" if changed else "ignored (not higher)")

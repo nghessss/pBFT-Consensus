@@ -29,6 +29,9 @@ class PBFTClient:
     def commit(self, req: pbft_pb2.CommitRequest, timeout=5.0):
         return self.stub.Commit(req, timeout=timeout)
 
+    def set_view(self, req: pbft_pb2.SetViewRequest, timeout=2.0):
+        return self.stub.SetView(req, timeout=timeout)
+
     def get_status(self):
         return self.stub.GetStatus(pbft_pb2.StatusRequest())
 
