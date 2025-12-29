@@ -1,20 +1,22 @@
-import streamlit as st
 import time
 
-from rpc.client import PBFTClient
+import streamlit as st
+
 from rpc import pbft_pb2
+from rpc.client import PBFTClient
+
 
 def render_sidebar(cluster):
     st.sidebar.header("⚙️ Cluster Controls (PBFT)")
 
     msg_box = st.sidebar.empty()
-    
+
     node_count = st.sidebar.number_input(
         "Number of nodes",
         min_value=4,
         max_value=10,
         value=len(cluster.nodes) if cluster.nodes else 4,
-        step=1
+        step=1,
     )
 
     ok, f = cluster.validate_node_count(int(node_count))
@@ -66,7 +68,7 @@ def render_sidebar(cluster):
             value=bool(node.get("byzantine", False)),
             disabled=running,
             key=f"byz_mode_{node_id}",
-            help="Stop the node to change this. When enabled, the replica will send malformed digests in Prepare/Commit."
+            help="Stop the node to change this. When enabled, the replica will send malformed digests in Prepare/Commit.",
         )
         node["byzantine"] = bool(byz_value)
 
@@ -96,15 +98,35 @@ def render_sidebar(cluster):
         st.sidebar.info("Apply node count first (valid: 4, 7, 10).")
         return
 
-    node_ids = [n["id"] for n in cluster.nodes]
-    target_id = st.sidebar.selectbox(
+    # Always target the current primary (disable dropdown selection)
+    primary_id = None
+    if cluster.is_running():
+        for n in cluster.nodes:
+            if not n.get("process"):
+                continue
+            try:
+                status = PBFTClient(f"localhost:{n['port']}").get_status()
+                primary_id = int(status.primary_id)
+                break
+            except Exception:
+                continue
+
+    # Fallback for initial view=0 when cluster isn't running yet
+    if primary_id is None:
+        primary_id = int(min(n["id"] for n in cluster.nodes))
+
+    primary_node = next(
+        (n for n in cluster.nodes if int(n["id"]) == int(primary_id)), None
+    )
+    if primary_node is None:
+        st.sidebar.error("Primary node not found")
+        return
+
+    st.sidebar.selectbox(
         "Send to node",
-        options=node_ids,
-        format_func=lambda node_id: next(
-            (f"Node {n['id']} (localhost:{n['port']})" for n in cluster.nodes if n["id"] == node_id),
-            f"Node {node_id}",
-        ),
-        disabled=not cluster.is_running(),
+        options=[int(primary_id)],
+        format_func=lambda _: f"Node {primary_node['id']} (localhost:{primary_node['port']}) • PRIMARY",
+        disabled=True,
     )
     payload = st.sidebar.text_input(
         "Payload",
@@ -112,14 +134,11 @@ def render_sidebar(cluster):
         disabled=not cluster.is_running(),
     )
 
-    if st.sidebar.button("Send Request", use_container_width=True, disabled=not cluster.is_running()):
+    if st.sidebar.button(
+        "Send Request", use_container_width=True, disabled=not cluster.is_running()
+    ):
         try:
-            target_node = next((n for n in cluster.nodes if n["id"] == target_id), None)
-            if target_node is None:
-                st.sidebar.error("Unknown target node")
-                return
-
-            client = PBFTClient(f"localhost:{target_node['port']}")
+            client = PBFTClient(f"localhost:{primary_node['port']}")
             now = int(time.time() * 1000)
             req = pbft_pb2.ClientRequest(
                 client_id="streamlit",

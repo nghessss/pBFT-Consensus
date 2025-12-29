@@ -52,12 +52,16 @@ class PBFTNode:
             if new_view <= state.view:
                 return False
             state.view = new_view
-        print(f"[PBFT {state.node_id}] VIEW -> {state.view} primary={state.primary_id} reason={reason}")
+        print(
+            f"[PBFT {state.node_id}] VIEW -> {state.view} primary={state.primary_id} reason={reason}"
+        )
         return True
 
     def _broadcast_set_view(self, new_view: int, reason: str) -> None:
         state = self.state
-        req = pbft_pb2.SetViewRequest(view=int(new_view), sender_id=int(state.node_id), reason=str(reason))
+        req = pbft_pb2.SetViewRequest(
+            view=int(new_view), sender_id=int(state.node_id), reason=str(reason)
+        )
         for pid, client in list(self.rpc_clients.items()):
             try:
                 client.set_view(req, timeout=0.5)
@@ -82,9 +86,13 @@ class PBFTNode:
 
             # primary unreachable -> bump view
             bumped_to = int(state.view) + 1
-            changed = self._set_view(bumped_to, reason=f"failover: primary {primary_id} unreachable")
+            changed = self._set_view(
+                bumped_to, reason=f"failover: primary {primary_id} unreachable"
+            )
             if changed:
-                self._broadcast_set_view(bumped_to, reason=f"failover: primary {primary_id} unreachable")
+                self._broadcast_set_view(
+                    bumped_to, reason=f"failover: primary {primary_id} unreachable"
+                )
 
         return int(state.primary_id) == int(state.node_id)
 
@@ -133,7 +141,9 @@ class PBFTNode:
 
         for peer in state.peers:
             try:
-                print(f"[PBFT {state.node_id}] SEND PREPARE -> {peer} view={view} seq={seq}")
+                print(
+                    f"[PBFT {state.node_id}] SEND PREPARE -> {peer} view={view} seq={seq}"
+                )
                 ack = self.rpc_clients[peer].prepare(prepare, timeout=0.5)
                 if hasattr(ack, "ok") and (not ack.ok):
                     print(
@@ -148,7 +158,9 @@ class PBFTNode:
     # ============================
     # RPC handlers (called by rpc/server.py)
     # ============================
-    def on_client_request(self, req: pbft_pb2.ClientRequest, timeout_s: float = 30.0) -> pbft_pb2.ClientReply:
+    def on_client_request(
+        self, req: pbft_pb2.ClientRequest, timeout_s: float = 30.0
+    ) -> pbft_pb2.ClientReply:
         state = self.state
 
         if not state.alive:
@@ -198,8 +210,12 @@ class PBFTNode:
                         forwarded=True,
                     )
                     try:
-                        print(f"[PBFT {state.node_id}] SEND REQUEST -> primary {state.primary_id}")
-                        return self.rpc_clients[state.primary_id].client_request(fwd, timeout=timeout_s)
+                        print(
+                            f"[PBFT {state.node_id}] SEND REQUEST -> primary {state.primary_id}"
+                        )
+                        return self.rpc_clients[state.primary_id].client_request(
+                            fwd, timeout=timeout_s
+                        )
                     except Exception as e:
                         return pbft_pb2.ClientReply(
                             client_id=req.client_id,
@@ -241,7 +257,9 @@ class PBFTNode:
             )
             state.log[key] = entry
 
-        print(f"[PBFT {state.node_id}] REQUEST  client={req.client_id} rid={req.request_id} -> view={view} seq={seq}")
+        print(
+            f"[PBFT {state.node_id}] REQUEST  client={req.client_id} rid={req.request_id} -> view={view} seq={seq}"
+        )
 
         # PRE-PREPARE
         pre = pbft_pb2.PrePrepareRequest(
@@ -274,7 +292,9 @@ class PBFTNode:
         # PBFT: primary multicasts PRE-PREPARE to replicas
         for peer in state.peers:
             try:
-                print(f"[PBFT {state.node_id}] SEND PRE-PREPARE -> {peer} view={view} seq={seq}")
+                print(
+                    f"[PBFT {state.node_id}] SEND PRE-PREPARE -> {peer} view={view} seq={seq}"
+                )
                 self.rpc_clients[peer].pre_prepare(pre, timeout=0.5)
             except Exception:
                 pass
@@ -313,7 +333,9 @@ class PBFTNode:
             error=entry.error or "",
         )
 
-    def on_pre_prepare(self, req: pbft_pb2.PrePrepareRequest, broadcast_prepare: bool = True) -> pbft_pb2.Ack:
+    def on_pre_prepare(
+        self, req: pbft_pb2.PrePrepareRequest, broadcast_prepare: bool = True
+    ) -> pbft_pb2.Ack:
         state = self.state
         if not state.alive:
             return pbft_pb2.Ack(ok=False, error="node is not alive")
@@ -365,7 +387,9 @@ class PBFTNode:
             )
 
         if broadcast_prepare:
-            self._multicast_prepare(view=int(req.view), seq=int(req.seq), digest=str(req.digest))
+            self._multicast_prepare(
+                view=int(req.view), seq=int(req.seq), digest=str(req.digest)
+            )
 
         return pbft_pb2.Ack(ok=True, error="")
 
@@ -383,14 +407,18 @@ class PBFTNode:
         if int(req.replica_id) == state.node_id:
             print(f"[PBFT {state.node_id}] LOCAL PREPARE view={req.view} seq={req.seq}")
         else:
-            print(f"[PBFT {state.node_id}] RECV PREPARE from {req.replica_id} view={req.view} seq={req.seq}")
+            print(
+                f"[PBFT {state.node_id}] RECV PREPARE from {req.replica_id} view={req.view} seq={req.seq}"
+            )
 
         with self._lock:
             entry = state.log.get(key)
             if entry is None:
                 pkey = self._pending_key(req.view, int(req.seq), req.digest)
                 state.pending_prepares.setdefault(pkey, set()).add(int(req.replica_id))
-                print(f"[PBFT {state.node_id}] BUFFER PREPARE from {req.replica_id} view={req.view} seq={req.seq} (no pre-prepare yet)")
+                print(
+                    f"[PBFT {state.node_id}] BUFFER PREPARE from {req.replica_id} view={req.view} seq={req.seq} (no pre-prepare yet)"
+                )
                 return pbft_pb2.Ack(ok=True, error="buffered")
             if entry.executed:
                 # Late/duplicate message after execution; ignore.
@@ -426,7 +454,9 @@ class PBFTNode:
             # PBFT: once PREPARED, multicast COMMIT (do not wait to be committed).
             for peer in state.peers:
                 try:
-                    print(f"[PBFT {state.node_id}] SEND COMMIT -> {peer} view={req.view} seq={req.seq}")
+                    print(
+                        f"[PBFT {state.node_id}] SEND COMMIT -> {peer} view={req.view} seq={req.seq}"
+                    )
                     ack = self.rpc_clients[peer].commit(commit, timeout=0.5)
                     if hasattr(ack, "ok") and (not ack.ok):
                         print(
@@ -454,14 +484,18 @@ class PBFTNode:
         if int(req.replica_id) == state.node_id:
             print(f"[PBFT {state.node_id}] LOCAL COMMIT view={req.view} seq={req.seq}")
         else:
-            print(f"[PBFT {state.node_id}] RECV COMMIT from {req.replica_id} view={req.view} seq={req.seq}")
+            print(
+                f"[PBFT {state.node_id}] RECV COMMIT from {req.replica_id} view={req.view} seq={req.seq}"
+            )
 
         with self._lock:
             entry = state.log.get(key)
             if entry is None:
                 pkey = self._pending_key(req.view, int(req.seq), req.digest)
                 state.pending_commits.setdefault(pkey, set()).add(int(req.replica_id))
-                print(f"[PBFT {state.node_id}] BUFFER COMMIT from {req.replica_id} view={req.view} seq={req.seq} (no pre-prepare yet)")
+                print(
+                    f"[PBFT {state.node_id}] BUFFER COMMIT from {req.replica_id} view={req.view} seq={req.seq} (no pre-prepare yet)"
+                )
                 return pbft_pb2.Ack(ok=True, error="buffered")
             if entry.executed:
                 return pbft_pb2.Ack(ok=True, error="ignored (already executed)")
@@ -475,7 +509,11 @@ class PBFTNode:
             commits_count = len(entry.commits)
             became_committed = False
             # Only move to COMMITTED after PREPARED (PBFT ordering)
-            if entry.prepared and (not entry.committed) and commits_count >= state.quorum_commit:
+            if (
+                entry.prepared
+                and (not entry.committed)
+                and commits_count >= state.quorum_commit
+            ):
                 entry.committed = True
                 became_committed = True
 
@@ -501,6 +539,8 @@ class PBFTNode:
             f"[PBFT {state.node_id}] REPLY    view={entry.view} seq={entry.seq} client={entry.client_id} rid={entry.request_id} result={entry.result!r}"
         )
 
+        print("=" * 37)
+
         with entry.done:
             entry.done.notify_all()
 
@@ -512,5 +552,7 @@ class PBFTNode:
         if not state.alive:
             return pbft_pb2.Ack(ok=False, error="node is not alive")
 
-        changed = self._set_view(int(req.view), reason=f"set by {req.sender_id}: {req.reason}")
+        changed = self._set_view(
+            int(req.view), reason=f"set by {req.sender_id}: {req.reason}"
+        )
         return pbft_pb2.Ack(ok=True, error="" if changed else "ignored (not higher)")

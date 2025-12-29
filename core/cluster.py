@@ -11,8 +11,10 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 
 
 class ClusterManager:
@@ -20,6 +22,7 @@ class ClusterManager:
         self.nodes = []  # [{id, port, process}]
         self.running = False
         self.last_error = ""
+        self._pid_dir = os.path.join(os.getcwd(), ".pbft_pids")
 
     def is_running(self):
         return self.running
@@ -85,8 +88,42 @@ class ClusterManager:
     def _quote_argv_for_shell(self, argv: list[str]) -> str:
         return " ".join(shlex.quote(a) for a in argv)
 
+    def _pidfile_for_node(self, node_id: int) -> str:
+        os.makedirs(self._pid_dir, exist_ok=True)
+        return os.path.join(self._pid_dir, f"node-{int(node_id)}.pid")
+
+    def _read_pidfile(self, pidfile: str) -> int | None:
+        try:
+            with open(pidfile, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+            return int(raw) if raw else None
+        except Exception:
+            return None
+
+    def _kill_pid(self, pid: int, timeout_s: float = 2.0) -> None:
+        # Terminate then force kill.
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except Exception:
+            return
+
+        deadline = time.time() + float(timeout_s)
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.05)
+            except ProcessLookupError:
+                return
+
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
     def _launch_in_new_terminal(
-        self, title: str, argv: list[str]
+        self, title: str, argv: list[str], pidfile: str
     ) -> subprocess.Popen | None:
         """Best-effort: open a new terminal window and run argv.
 
@@ -96,8 +133,11 @@ class ClusterManager:
             return None
 
         cmdline = self._quote_argv_for_shell(argv)
-        # Keep the window open after the process exits.
-        bash_cmd = f"{cmdline}; echo; echo '[{title}] exited (code=$?)'; exec bash"
+        pidfile_q = shlex.quote(pidfile)
+
+        # Run node as a child process, record its PID, and wait for it.
+        # When the node is killed, `wait` returns and the terminal closes.
+        bash_cmd = f"({cmdline}) & echo $! > {pidfile_q}; wait $!"
 
         # Prefer explicit terminal emulators (Ubuntu commonly has gnome-terminal).
         candidates: list[tuple[str, list[str]]] = []
@@ -106,7 +146,16 @@ class ClusterManager:
             candidates.append(
                 (
                     "gnome-terminal",
-                    ["gnome-terminal", "--title", title, "--", "bash", "-lc", bash_cmd],
+                    [
+                        "gnome-terminal",
+                        "--wait",
+                        "--title",
+                        title,
+                        "--",
+                        "bash",
+                        "-lc",
+                        bash_cmd,
+                    ],
                 )
             )
 
@@ -116,6 +165,7 @@ class ClusterManager:
                     "konsole",
                     [
                         "konsole",
+                        "--nofork",
                         "--new-window",
                         "-p",
                         f"tabtitle={title}",
@@ -133,9 +183,9 @@ class ClusterManager:
                     "xfce4-terminal",
                     [
                         "xfce4-terminal",
+                        "--disable-server",
                         "--title",
                         title,
-                        "--hold",
                         "--command",
                         f"bash -lc {shlex.quote(bash_cmd)}",
                     ],
@@ -146,7 +196,7 @@ class ClusterManager:
             candidates.append(
                 (
                     "xterm",
-                    ["xterm", "-hold", "-T", title, "-e", "bash", "-lc", bash_cmd],
+                    ["xterm", "-T", title, "-e", "bash", "-lc", bash_cmd],
                 )
             )
 
@@ -177,6 +227,8 @@ class ClusterManager:
 
         title = f"PBFT-Node-{node['id']}"
         argv = self._build_node_argv(node)
+        pidfile = self._pidfile_for_node(int(node["id"]))
+        node["pidfile"] = pidfile
 
         # Windows: open a new console window.
         if os.name == "nt":
@@ -186,7 +238,7 @@ class ClusterManager:
             node["process"] = subprocess.Popen(full_cmd, creationflags=creationflags)
         else:
             # Linux/macOS: try to open a new terminal window; fall back to background.
-            proc = self._launch_in_new_terminal(title=title, argv=argv)
+            proc = self._launch_in_new_terminal(title=title, argv=argv, pidfile=pidfile)
             if proc is None:
                 node["process"] = subprocess.Popen(argv, start_new_session=True)
             else:
@@ -213,6 +265,13 @@ class ClusterManager:
                     check=False,
                 )
             else:
+                # Kill the actual node process (so the terminal command ends and the window closes).
+                pidfile = node.get("pidfile")
+                if isinstance(pidfile, str) and pidfile:
+                    pid = self._read_pidfile(pidfile)
+                    if isinstance(pid, int) and pid > 1:
+                        self._kill_pid(pid)
+
                 proc.terminate()
                 try:
                     proc.wait(timeout=3)
@@ -222,6 +281,7 @@ class ClusterManager:
             print(f"Failed to stop node {node['id']}: {e}")
 
         node["process"] = None
+        node.pop("pidfile", None)
         self.running = any(n.get("process") for n in self.nodes)
 
     def start_all(self):
@@ -251,6 +311,12 @@ class ClusterManager:
                             check=False,
                         )
                     else:
+                        pidfile = node.get("pidfile")
+                        if isinstance(pidfile, str) and pidfile:
+                            pid = self._read_pidfile(pidfile)
+                            if isinstance(pid, int) and pid > 1:
+                                self._kill_pid(pid)
+
                         proc.terminate()
                         try:
                             proc.wait(timeout=3)
@@ -260,5 +326,6 @@ class ClusterManager:
                     print(f"Failed to stop node {node['id']}: {e}")
 
                 node["process"] = None
+                node.pop("pidfile", None)
 
         self.running = False
