@@ -127,6 +127,10 @@ class PBFTNode:
 
     def _multicast_prepare(self, view: int, seq: int, digest: str) -> None:
         state = self.state
+        # Per current simulation rules: the primary must NOT send PREPARE.
+        # Only replicas send PREPARE after receiving PRE-PREPARE.
+        if int(state.node_id) == int(state.primary_id):
+            return
         out_digest = self._maybe_corrupt_digest(str(digest))
         if state.byzantine and out_digest != str(digest):
             print(
@@ -269,25 +273,8 @@ class PBFTNode:
             primary_id=state.node_id,
             request=req,
         )
-        # IMPORTANT: process our own PRE-PREPARE first so we can't execute+reply
-        # before locally accepting this request.
-        ack = self.on_pre_prepare(pre, broadcast_prepare=False)
-        if not ack.ok:
-            return pbft_pb2.ClientReply(
-                client_id=req.client_id,
-                request_id=req.request_id,
-                replica_id=state.node_id,
-                view=view,
-                seq=seq,
-                committed=False,
-                result="",
-                error=f"local pre-prepare failed: {ack.error}",
-            )
-
-        # Multicast our PREPARE early (and count our own PREPARE) so we don't end up
-        # executing+replying before the primary's PREPARE step runs (due to concurrent RPC handling).
-        # Replicas can buffer PREPARE if it arrives before PRE-PREPARE.
-        self._multicast_prepare(view=view, seq=seq, digest=digest)
+        # Per current simulation rules: primary only sends PRE-PREPARE to replicas.
+        # No local PRE-PREPARE processing and no PREPARE from primary.
 
         # PBFT: primary multicasts PRE-PREPARE to replicas
         for peer in state.peers:
