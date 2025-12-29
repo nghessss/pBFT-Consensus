@@ -76,8 +76,7 @@ class PBFTState:
 
     @property
     def quorum_prepare(self) -> int:
-        # prepared requires 2f+1 prepares (incl. self)
-        return 2 * self.f + 1
+        return 2 * self.f
 
     @property
     def quorum_commit(self) -> int:
