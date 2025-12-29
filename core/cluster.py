@@ -1,10 +1,23 @@
-# core/cluster_manager.py
+"""Cluster process manager.
+
+On Windows we spawn each node in a new console window.
+On Linux/macOS we try to open a new terminal emulator window when a GUI is available.
+If no GUI terminal is available (e.g. headless server), we fall back to running the
+node process in the background.
+"""
+
+from __future__ import annotations
+
+import os
+import shlex
+import shutil
 import subprocess
 import sys
 
+
 class ClusterManager:
     def __init__(self):
-        self.nodes = []        # [{id, port, process}]
+        self.nodes = []  # [{id, port, process}]
         self.running = False
         self.last_error = ""
 
@@ -25,7 +38,9 @@ class ClusterManager:
 
         ok, f = self.validate_node_count(int(n))
         if not ok:
-            self.last_error = f"Invalid PBFT node count n={n}. Must be n = 3f + 1 (e.g. 4, 7, 10)."
+            self.last_error = (
+                f"Invalid PBFT node count n={n}. Must be n = 3f + 1 (e.g. 4, 7, 10)."
+            )
             self.nodes = []
             return
 
@@ -33,12 +48,14 @@ class ClusterManager:
         self.nodes = []
         base_port = 5000
         for i in range(n):
-            self.nodes.append({
-                "id": i + 1,
-                "port": base_port + i + 1,
-                "process": None,
-                "byzantine": False,
-            })
+            self.nodes.append(
+                {
+                    "id": i + 1,
+                    "port": base_port + i + 1,
+                    "process": None,
+                    "byzantine": False,
+                }
+            )
 
     def _peer_str(self) -> str:
         peer_args = []
@@ -46,16 +63,110 @@ class ClusterManager:
             peer_args.append(f"{node['id']}@localhost:{node['port']}")
         return ",".join(peer_args)
 
-    def _build_python_cmd(self, node: dict) -> str:
-        byz_arg = " --byzantine" if node.get("byzantine") else ""
-        python_cmd = (
-            f'{sys.executable} run_node.py '
-            f'--id {node["id"]} '
-            f'--port {node["port"]} '
-            f'--peers "{self._peer_str()}"'
-            f'{byz_arg}'
-        )
-        return python_cmd
+    def _build_node_argv(self, node: dict) -> list[str]:
+        argv = [
+            sys.executable,
+            "run_node.py",
+            "--id",
+            str(node["id"]),
+            "--port",
+            str(node["port"]),
+            "--peers",
+            self._peer_str(),
+        ]
+        if node.get("byzantine"):
+            argv.append("--byzantine")
+        return argv
+
+    def _has_gui(self) -> bool:
+        # Common display env vars across X11/Wayland.
+        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+    def _quote_argv_for_shell(self, argv: list[str]) -> str:
+        return " ".join(shlex.quote(a) for a in argv)
+
+    def _launch_in_new_terminal(
+        self, title: str, argv: list[str]
+    ) -> subprocess.Popen | None:
+        """Best-effort: open a new terminal window and run argv.
+
+        Returns a Popen handle for the terminal emulator, or None if we couldn't.
+        """
+        if not self._has_gui():
+            return None
+
+        cmdline = self._quote_argv_for_shell(argv)
+        # Keep the window open after the process exits.
+        bash_cmd = f"{cmdline}; echo; echo '[{title}] exited (code=$?)'; exec bash"
+
+        # Prefer explicit terminal emulators (Ubuntu commonly has gnome-terminal).
+        candidates: list[tuple[str, list[str]]] = []
+
+        if shutil.which("gnome-terminal"):
+            candidates.append(
+                (
+                    "gnome-terminal",
+                    ["gnome-terminal", "--title", title, "--", "bash", "-lc", bash_cmd],
+                )
+            )
+
+        if shutil.which("konsole"):
+            candidates.append(
+                (
+                    "konsole",
+                    [
+                        "konsole",
+                        "--new-window",
+                        "-p",
+                        f"tabtitle={title}",
+                        "-e",
+                        "bash",
+                        "-lc",
+                        bash_cmd,
+                    ],
+                )
+            )
+
+        if shutil.which("xfce4-terminal"):
+            candidates.append(
+                (
+                    "xfce4-terminal",
+                    [
+                        "xfce4-terminal",
+                        "--title",
+                        title,
+                        "--hold",
+                        "--command",
+                        f"bash -lc {shlex.quote(bash_cmd)}",
+                    ],
+                )
+            )
+
+        if shutil.which("xterm"):
+            candidates.append(
+                (
+                    "xterm",
+                    ["xterm", "-hold", "-T", title, "-e", "bash", "-lc", bash_cmd],
+                )
+            )
+
+        # Debian/Ubuntu alternative that usually exists if *any* terminal does.
+        if shutil.which("x-terminal-emulator"):
+            candidates.append(
+                (
+                    "x-terminal-emulator",
+                    ["x-terminal-emulator", "-e", "bash", "-lc", bash_cmd],
+                )
+            )
+
+        for name, terminal_cmd in candidates:
+            try:
+                return subprocess.Popen(terminal_cmd)
+            except Exception as e:
+                self.last_error = f"Failed to open terminal via {name}: {e}"
+                continue
+
+        return None
 
     def start_node(self, node_id: int):
         node = next((n for n in self.nodes if int(n.get("id")) == int(node_id)), None)
@@ -64,12 +175,22 @@ class ClusterManager:
         if node.get("process"):
             return
 
-        python_cmd = self._build_python_cmd(node)
-        full_cmd = f'cmd.exe /k title PBFT-Node-{node["id"]} && {python_cmd}'
-        node["process"] = subprocess.Popen(
-            full_cmd,
-            creationflags=subprocess.CREATE_NEW_CONSOLE
-        )
+        title = f"PBFT-Node-{node['id']}"
+        argv = self._build_node_argv(node)
+
+        # Windows: open a new console window.
+        if os.name == "nt":
+            cmdline = subprocess.list2cmdline(argv)
+            full_cmd = f"cmd.exe /k title {title} && {cmdline}"
+            creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            node["process"] = subprocess.Popen(full_cmd, creationflags=creationflags)
+        else:
+            # Linux/macOS: try to open a new terminal window; fall back to background.
+            proc = self._launch_in_new_terminal(title=title, argv=argv)
+            if proc is None:
+                node["process"] = subprocess.Popen(argv, start_new_session=True)
+            else:
+                node["process"] = proc
 
         # Update global running flag
         self.running = any(n.get("process") for n in self.nodes)
@@ -84,11 +205,19 @@ class ClusterManager:
             return
 
         try:
-            subprocess.run(
-                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            else:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
         except Exception as e:
             print(f"Failed to stop node {node['id']}: {e}")
 
@@ -101,9 +230,7 @@ class ClusterManager:
 
         ok, _ = self.validate_node_count(len(self.nodes))
         if not ok:
-            self.last_error = (
-                f"Invalid PBFT node count n={len(self.nodes)}. Must be n = 3f + 1 (e.g. 4, 7, 10)."
-            )
+            self.last_error = f"Invalid PBFT node count n={len(self.nodes)}. Must be n = 3f + 1 (e.g. 4, 7, 10)."
             return
 
         self.last_error = ""
@@ -111,17 +238,24 @@ class ClusterManager:
         for node in self.nodes:
             self.start_node(node["id"])
 
-
     def stop_all(self):
         for node in self.nodes:
             proc = node["process"]
             if proc:
                 try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
+                    if os.name == "nt":
+                        subprocess.run(
+                            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                        )
+                    else:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
                 except Exception as e:
                     print(f"Failed to stop node {node['id']}: {e}")
 
