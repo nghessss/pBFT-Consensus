@@ -113,6 +113,25 @@ class PBFTNode:
             return digest
         return f"{digest}:byz"
 
+    def _multicast_prepare(self, view: int, seq: int, digest: str) -> None:
+        state = self.state
+        prepare = pbft_pb2.PrepareRequest(
+            view=int(view),
+            seq=int(seq),
+            digest=self._maybe_corrupt_digest(str(digest)),
+            replica_id=int(state.node_id),
+        )
+
+        for peer in state.peers:
+            try:
+                print(f"[PBFT {state.node_id}] SEND PREPARE -> {peer} view={view} seq={seq}")
+                self.rpc_clients[peer].prepare(prepare, timeout=0.5)
+            except Exception:
+                pass
+
+        # Count our own PREPARE vote locally
+        self.on_prepare(prepare)
+
     # ============================
     # RPC handlers (called by rpc/server.py)
     # ============================
@@ -219,15 +238,33 @@ class PBFTNode:
             primary_id=state.node_id,
             request=req,
         )
-        # PBFT: primary multicasts PRE-PREPARE first, then processes locally (as a replica)
+        # IMPORTANT: process our own PRE-PREPARE first so we can't execute+reply
+        # before locally accepting this request.
+        ack = self.on_pre_prepare(pre, broadcast_prepare=False)
+        if not ack.ok:
+            return pbft_pb2.ClientReply(
+                client_id=req.client_id,
+                request_id=req.request_id,
+                replica_id=state.node_id,
+                view=view,
+                seq=seq,
+                committed=False,
+                result="",
+                error=f"local pre-prepare failed: {ack.error}",
+            )
+
+        # Multicast our PREPARE early (and count our own PREPARE) so we don't end up
+        # executing+replying before the primary's PREPARE step runs (due to concurrent RPC handling).
+        # Replicas can buffer PREPARE if it arrives before PRE-PREPARE.
+        self._multicast_prepare(view=view, seq=seq, digest=digest)
+
+        # PBFT: primary multicasts PRE-PREPARE to replicas
         for peer in state.peers:
             try:
                 print(f"[PBFT {state.node_id}] SEND PRE-PREPARE -> {peer} view={view} seq={seq}")
-                self.rpc_clients[peer].pre_prepare(pre)
+                self.rpc_clients[peer].pre_prepare(pre, timeout=0.5)
             except Exception:
                 pass
-
-        self.on_pre_prepare(pre)  # local
 
         # Wait until committed (primary returns a single reply)
         entry = state.log[self._entry_key(view, seq)]
@@ -263,7 +300,7 @@ class PBFTNode:
             error=entry.error or "",
         )
 
-    def on_pre_prepare(self, req: pbft_pb2.PrePrepareRequest) -> pbft_pb2.Ack:
+    def on_pre_prepare(self, req: pbft_pb2.PrePrepareRequest, broadcast_prepare: bool = True) -> pbft_pb2.Ack:
         state = self.state
         if not state.alive:
             return pbft_pb2.Ack(ok=False, error="node is not alive")
@@ -311,23 +348,8 @@ class PBFTNode:
                 f"[PBFT {state.node_id}] RECV PRE-PREPARE from {req.primary_id} view={req.view} seq={req.seq} digest={req.digest[:8]}..."
             )
 
-        # PREPARE (broadcast)
-        prepare = pbft_pb2.PrepareRequest(
-            view=req.view,
-            seq=req.seq,
-            digest=self._maybe_corrupt_digest(req.digest),
-            replica_id=state.node_id,
-        )
-        # PBFT: every replica (including the primary) multicasts PREPARE.
-        for peer in state.peers:
-            try:
-                print(f"[PBFT {state.node_id}] SEND PREPARE -> {peer} view={req.view} seq={req.seq}")
-                self.rpc_clients[peer].prepare(prepare)
-            except Exception:
-                pass
-
-        # Count our own PREPARE vote locally
-        self.on_prepare(prepare)
+        if broadcast_prepare:
+            self._multicast_prepare(view=int(req.view), seq=int(req.seq), digest=str(req.digest))
 
         return pbft_pb2.Ack(ok=True, error="")
 
@@ -382,7 +404,7 @@ class PBFTNode:
             for peer in state.peers:
                 try:
                     print(f"[PBFT {state.node_id}] SEND COMMIT -> {peer} view={req.view} seq={req.seq}")
-                    self.rpc_clients[peer].commit(commit)
+                    self.rpc_clients[peer].commit(commit, timeout=0.5)
                 except Exception:
                     pass
 
@@ -446,7 +468,7 @@ class PBFTNode:
             entry.error = ""
 
         print(
-            f"[PBFT {state.node_id}] REPLY    client={entry.client_id} rid={entry.request_id} result={entry.result!r}"
+            f"[PBFT {state.node_id}] REPLY    view={entry.view} seq={entry.seq} client={entry.client_id} rid={entry.request_id} result={entry.result!r}"
         )
 
         with entry.done:
