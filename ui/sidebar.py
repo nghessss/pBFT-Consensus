@@ -72,27 +72,6 @@ def render_sidebar(cluster):
         )
         node["byzantine"] = bool(byz_value)
 
-        c1, c2 = st.sidebar.columns(2)
-        with c1:
-            if st.sidebar.button(
-                f"▶️ Start Node {node_id}",
-                use_container_width=True,
-                disabled=running,
-                key=f"start_node_{node_id}",
-            ):
-                cluster.start_node(node_id)
-                msg_box.success(f"Node {node_id} started")
-
-        with c2:
-            if st.sidebar.button(
-                f"💥 Crash Node {node_id}",
-                use_container_width=True,
-                disabled=not running,
-                key=f"crash_node_{node_id}",
-            ):
-                cluster.stop_node(node_id)
-                msg_box.warning(f"Node {node_id} crashed")
-
     st.sidebar.markdown("### 📩 Client Request")
     if not cluster.nodes:
         st.sidebar.info("Apply node count first (valid: 4, 7, 10).")

@@ -1,9 +1,10 @@
-import streamlit as st
 import time
 
+import streamlit as st
+
 from core.cluster import ClusterManager
+from ui.cluster_view import render_cluster_view
 from ui.sidebar import render_sidebar
-from ui.cluster_view import render_cluster_html
 
 st.set_page_config(page_title="PBFT Simulator", layout="wide")
 st.title("🛠️ PBFT Consensus Simulator")
@@ -29,8 +30,7 @@ st.subheader("Cluster View")
 if not cluster.nodes:
     st.info("Cluster not initialized. Choose node count and start cluster.")
 else:
-    html = render_cluster_html(cluster.nodes)
-    st.components.v1.html(html, height=500)
+    render_cluster_view(cluster)
 
 time.sleep(0.5)
 st.rerun()
