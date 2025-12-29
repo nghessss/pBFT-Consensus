@@ -36,8 +36,64 @@ class ClusterManager:
             self.nodes.append({
                 "id": i + 1,
                 "port": base_port + i + 1,
-                "process": None
+                "process": None,
+                "byzantine": False,
             })
+
+    def _peer_str(self) -> str:
+        peer_args = []
+        for node in self.nodes:
+            peer_args.append(f"{node['id']}@localhost:{node['port']}")
+        return ",".join(peer_args)
+
+    def _build_python_cmd(self, node: dict) -> str:
+        byz_arg = " --byzantine" if node.get("byzantine") else ""
+        python_cmd = (
+            f'{sys.executable} run_node.py '
+            f'--id {node["id"]} '
+            f'--port {node["port"]} '
+            f'--peers "{self._peer_str()}"'
+            f'{byz_arg}'
+        )
+        return python_cmd
+
+    def start_node(self, node_id: int):
+        node = next((n for n in self.nodes if int(n.get("id")) == int(node_id)), None)
+        if node is None:
+            return
+        if node.get("process"):
+            return
+
+        python_cmd = self._build_python_cmd(node)
+        full_cmd = f'cmd.exe /k title PBFT-Node-{node["id"]} && {python_cmd}'
+        node["process"] = subprocess.Popen(
+            full_cmd,
+            creationflags=subprocess.CREATE_NEW_CONSOLE
+        )
+
+        # Update global running flag
+        self.running = any(n.get("process") for n in self.nodes)
+
+    def stop_node(self, node_id: int):
+        node = next((n for n in self.nodes if int(n.get("id")) == int(node_id)), None)
+        if node is None:
+            return
+
+        proc = node.get("process")
+        if not proc:
+            return
+
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        except Exception as e:
+            print(f"Failed to stop node {node['id']}: {e}")
+
+        node["process"] = None
+        self.running = any(n.get("process") for n in self.nodes)
 
     def start_all(self):
         if self.running:
@@ -52,31 +108,8 @@ class ClusterManager:
 
         self.last_error = ""
 
-        peer_args = []
         for node in self.nodes:
-            peer_args.append(f"{node['id']}@localhost:{node['port']}")
-
-        peer_str = ",".join(peer_args)
-
-        for node in self.nodes:
-            python_cmd = (
-                f'{sys.executable} run_node.py '
-                f'--id {node["id"]} '
-                f'--port {node["port"]} '
-                f'--peers "{peer_str}"'
-            )
-
-            full_cmd = (
-                f'cmd.exe /k '
-                f'title PBFT-Node-{node["id"]} && {python_cmd}'            
-            )
-
-            node["process"] = subprocess.Popen(
-                full_cmd,
-                creationflags=subprocess.CREATE_NEW_CONSOLE
-            )
-
-        self.running = True
+            self.start_node(node["id"])
 
 
     def stop_all(self):

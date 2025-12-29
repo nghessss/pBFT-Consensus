@@ -33,6 +33,11 @@ class PBFTState:
         self.peers = peers
         self.alive = True
 
+        # Fault simulation
+        # - alive=False: crash/stop participating (handlers return errors)
+        # - byzantine=True: still alive but can send malformed protocol messages
+        self.byzantine = False
+
         # PBFT metadata
         self.view = 0
         self.next_seq = 1

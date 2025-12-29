@@ -40,6 +40,13 @@ class PBFTNode:
     def _pending_key(self, view: int, seq: int, digest: str) -> Tuple[int, int, str]:
         return (int(view), int(seq), str(digest))
 
+    def _maybe_corrupt_digest(self, digest: str) -> str:
+        # Simulate Byzantine behavior by sending an invalid digest.
+        # Keep it deterministic and obviously mismatching.
+        if not self.state.byzantine:
+            return digest
+        return f"{digest}:byz"
+
     # ============================
     # RPC handlers (called by rpc/server.py)
     # ============================
@@ -231,7 +238,7 @@ class PBFTNode:
         prepare = pbft_pb2.PrepareRequest(
             view=req.view,
             seq=req.seq,
-            digest=req.digest,
+            digest=self._maybe_corrupt_digest(req.digest),
             replica_id=state.node_id,
         )
         if state.node_id != state.primary_id:
@@ -288,7 +295,7 @@ class PBFTNode:
             commit = pbft_pb2.CommitRequest(
                 view=req.view,
                 seq=req.seq,
-                digest=req.digest,
+                digest=self._maybe_corrupt_digest(req.digest),
                 replica_id=state.node_id,
             )
             # PBFT: once PREPARED, multicast COMMIT (do not wait to be committed).

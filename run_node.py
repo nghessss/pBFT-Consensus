@@ -12,6 +12,11 @@ def main():
     parser.add_argument("--id", type=int, required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument(
+        "--byzantine",
+        action="store_true",
+        help="Start this replica in byzantine mode (sends malformed protocol messages)"
+    )
+    parser.add_argument(
         "--peers",
         type=str,
         default="",
@@ -45,10 +50,14 @@ def main():
         rpc_clients=clients
     )
 
+    node.state.byzantine = bool(args.byzantine)
+
     print("=" * 50)
     node.start()
     print(f"[Node {args.id}] Port : {args.port}")
     print(f"[Node {args.id}] Peers: {list(peers.keys())}")
+    if node.state.byzantine:
+        print(f"[Node {args.id}] MODE : BYZANTINE")
     print("=" * 50)
     
     # ============================

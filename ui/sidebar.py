@@ -51,10 +51,45 @@ def render_sidebar(cluster):
     st.sidebar.markdown("### 🔍 Node List")
 
     for node in cluster.nodes:
+        node_id = int(node["id"])
+        running = bool(node.get("process"))
+        status_text = "RUNNING" if running else "STOPPED"
+
         st.sidebar.write(
-            f"Node {node['id']} | Port {node['port']} | "
-            f"{'RUNNING' if node['process'] else 'STOPPED'}"
+            f"Node {node_id} | Port {node['port']} | {status_text} | "
+            f"Byzantine={'ON' if node.get('byzantine') else 'OFF'}"
         )
+
+        # Configure byzantine mode (requires restart)
+        byz_value = st.sidebar.checkbox(
+            f"Byzantine mode (Node {node_id})",
+            value=bool(node.get("byzantine", False)),
+            disabled=running,
+            key=f"byz_mode_{node_id}",
+            help="Stop the node to change this. When enabled, the replica will send malformed digests in Prepare/Commit."
+        )
+        node["byzantine"] = bool(byz_value)
+
+        c1, c2 = st.sidebar.columns(2)
+        with c1:
+            if st.sidebar.button(
+                f"▶️ Start Node {node_id}",
+                use_container_width=True,
+                disabled=running,
+                key=f"start_node_{node_id}",
+            ):
+                cluster.start_node(node_id)
+                msg_box.success(f"Node {node_id} started")
+
+        with c2:
+            if st.sidebar.button(
+                f"💥 Crash Node {node_id}",
+                use_container_width=True,
+                disabled=not running,
+                key=f"crash_node_{node_id}",
+            ):
+                cluster.stop_node(node_id)
+                msg_box.warning(f"Node {node_id} crashed")
 
     st.sidebar.markdown("### 📩 Client Request")
     if not cluster.nodes:
